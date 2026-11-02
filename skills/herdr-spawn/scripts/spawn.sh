@@ -1,15 +1,39 @@
 #!/usr/bin/env bash
-# Usage: spawn.sh <name> '<launch-command>' [<pane-id> <right|down>]
-# Splits a sibling pane, types the launch command into its interactive shell (so wrappers, aliases and
-# `$(cat file)` expand there), waits for Herdr to detect the agent, names it, and prints
+# Usage: spawn.sh <agent> <name> <prompt-file> [<pane-id> <right|down>]
+# Splits a sibling pane, types the agent's launch line into its interactive shell (so wrappers, aliases and
+# functions apply, and `$(cat file)` expands there), waits for Herdr to detect the agent, names it, and prints
 # "<pane-id> <name> <agent-kind> <status>". Without the optional pane/direction, a picker keeps the tab an even
 # grid (1 → 2 columns → 2×2 → 3×2 → 3×3 …):
 #   1. A column with fewer panes than the tallest column is filled first: split its largest pane "down".
 #   2. Otherwise every column has R panes. With C columns: C <= R adds a column ("right"), C > R a row ("down").
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
+# Launch templates ({name}, {prompt}) come from built-in defaults, overridden or extended by the config file
+# ${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}: one "<agent> <template>" per
+# line; blank lines and full-line # comments are ignored.
 set -euo pipefail
 
 die() { echo "spawn.sh: $*" >&2; exit 1; }
+
+conf=${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}
+
+# Prints "<agent> <template>" lines: the config's entries first (they win), then the built-in defaults.
+templates() {
+  if [ -r "$conf" ]; then
+    local a t
+    while read -r a t || [ -n "$a" ]; do
+      case $a in ''|'#'*) continue ;; esac
+      printf '%s %s\n' "$a" "$t"
+    done <"$conf"
+  fi
+  printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}'
+}
+
+# subst <string> <token> <value>: replaces every literal token; the value is never rescanned.
+subst() {
+  local s=$1 k=$2 v=$3 out=
+  while [[ $s == *"$k"* ]]; do out+=${s%%"$k"*}$v; s=${s#*"$k"}; done
+  printf '%s' "$out$s"
+}
 
 pick() {
   herdr pane layout --current | jq -r --arg caller "${HERDR_PANE_ID:-}" '
@@ -28,15 +52,24 @@ pick() {
       end'
 }
 
-[ $# -eq 2 ] || [ $# -eq 4 ] || die "usage: spawn.sh <name> '<launch-command>' [<pane-id> <right|down>]"
-name=$1 launch=$2
+[ $# -eq 3 ] || [ $# -eq 5 ] || die "usage: spawn.sh <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+agent=$1 name=$2 promptfile=$3
+[[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
+[ -r "$promptfile" ] || die "prompt file not readable: $promptfile"
+
+template=$(templates | awk -v a="$agent" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
+if [ -z "$template" ]; then
+  die "unknown agent '$agent'; known: $(templates | awk '{print $1}' | sort -u | paste -sd' ' -); add one to $conf"
+fi
+launch=$(subst "$template" '{name}' "$name")
+launch=$(subst "$launch" '{prompt}' "\"\$(cat $(printf %q "$promptfile"))\"")
+
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (HERDR_ENV != 1)"
 command -v jq >/dev/null || die "jq is required"
-[[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
 
-if [ $# -eq 4 ]; then
-  target=$3 dir=$4
+if [ $# -eq 5 ]; then
+  target=$4 dir=$5
 else
   picked=$(pick) || die "could not pick a pane to split; pass <pane-id> <right|down>"
   read -r target dir <<<"$picked"
