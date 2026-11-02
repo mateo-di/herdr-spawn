@@ -4,7 +4,7 @@ A skill that lets a coding agent spawn another agent session (`claude`, `codex`,
 
 ## Requirements
 
-- Herdr 0.9 or newer, with the caller running inside a Herdr pane
+- Herdr 0.9.1 or newer, with the caller running inside a Herdr pane
 - `jq`
 
 ## Install

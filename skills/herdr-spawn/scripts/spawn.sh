@@ -35,11 +35,18 @@ command -v jq >/dev/null || die "jq is required"
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
 
-if [ $# -eq 4 ]; then target=$3 dir=$4; else read -r target dir < <(pick); fi
-[ -n "${target:-}" ] && [ -n "${dir:-}" ] || die "could not pick a pane to split; pass <pane-id> <right|down>"
+if [ $# -eq 4 ]; then
+  target=$3 dir=$4
+else
+  picked=$(pick) || die "could not pick a pane to split; pass <pane-id> <right|down>"
+  read -r target dir <<<"$picked"
+fi
+{ [ -n "${target:-}" ] && [ "$target" != null ] && [ -n "${dir:-}" ] && [ "$dir" != null ]; } ||
+  die "could not pick a pane to split; pass <pane-id> <right|down>"
 
 pane=$(herdr pane split "$target" --direction "$dir" --cwd "$PWD" --no-focus | jq -r '.result.pane.pane_id')
-herdr pane run "$pane" "$launch" >/dev/null
+{ [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
+herdr pane run "$pane" "$launch" >/dev/null || die "launch failed; pane $pane left open"
 
 info=
 for _ in $(seq 120); do
@@ -47,7 +54,8 @@ for _ in $(seq 120); do
   info=
   sleep 0.5
 done
-[ -n "$info" ] || die "no agent detected in pane $pane after 60s; inspect with: herdr pane read $pane --source recent --lines 40"
+[ -n "$info" ] || die "no agent detected in pane $pane after 60s, pane left open; inspect with: herdr pane read $pane --source recent --lines 40"
 
-herdr agent rename "$pane" "$name" >/dev/null
+herdr agent rename "$pane" "$name" >/dev/null ||
+  die "agent running in $pane but rename to $name failed (name taken?)"
 jq -r --arg name "$name" '.result.agent | "\(.pane_id) \($name) \(.agent) \(.agent_status)"' <<<"$info"
