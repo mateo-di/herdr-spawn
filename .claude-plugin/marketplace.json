@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "herdr-spawn",
+  "description": "Spawn coding-agent sessions (claude, codex, opencode) in sibling Herdr panes.",
+  "owner": {
+    "name": "mateo-di",
+    "url": "https://github.com/mateo-di"
+  },
+  "plugins": [
+    {
+      "name": "herdr-spawn",
+      "description": "Spawn a claude, codex or opencode session in a sibling Herdr pane with an initial prompt, then coordinate with it.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
