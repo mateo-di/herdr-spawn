@@ -28,13 +28,6 @@ templates() {
   printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}'
 }
 
-# subst <string> <token> <value>: replaces every literal token; the value is never rescanned.
-subst() {
-  local s=$1 k=$2 v=$3 out=
-  while [[ $s == *"$k"* ]]; do out+=${s%%"$k"*}$v; s=${s#*"$k"}; done
-  printf '%s' "$out$s"
-}
-
 pick() {
   herdr pane layout --current | jq -r --arg caller "${HERDR_PANE_ID:-}" '
     def pick: (map(. + {area: (.rect.width * .rect.height)})
@@ -61,8 +54,9 @@ template=$(templates | awk -v a="$agent" '!d && $1 == a { sub(/^[^ ]+ /, ""); pr
 if [ -z "$template" ]; then
   die "unknown agent '$agent'; known: $(templates | awk '{print $1}' | sort -u | paste -sd' ' -); add one to $conf"
 fi
-launch=$(subst "$template" '{name}' "$name")
-launch=$(subst "$launch" '{prompt}' "\"\$(cat $(printf %q "$promptfile"))\"")
+promptarg="\"\$(cat $(printf %q "$promptfile"))\""
+launch=${template//"{name}"/"$name"}
+launch=${launch//"{prompt}"/"$promptarg"}
 
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (HERDR_ENV != 1)"
 command -v jq >/dev/null || die "jq is required"
