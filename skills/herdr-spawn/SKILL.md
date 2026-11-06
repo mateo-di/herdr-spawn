@@ -5,7 +5,7 @@ description: Spawn a coding-agent session (claude, codex, opencode, or any confi
 
 # herdr-spawn
 
-Spawns a child agent in a new pane split from this one and hands it a prompt file. For prompting, waiting, reading, dialogs and closing panes, follow the built-in `herdr` skill; if it isn't loaded, run `herdr --skill` and read it.
+Spawns a child agent in a new pane split from this one and hands it a prompt file. For prompting, waiting, reading, dialogs and closing panes, follow the built-in `herdr` skill; if it isn't loaded, run `herdr --skill` and read it. In the Herdr app (`HC_TERMINAL_ID` set, no `HERDR_ENV`), use herdr-core instead: `hc send`, `hc wait` and `hc read` with the child's terminal, and `hc --skill` for the rest.
 
 ## Agents
 
@@ -37,11 +37,11 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 
 ## Layout
 
-The tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time.
+The tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction.
 
 ## Steps
 
-1. Pick the agent and a child name (example `review-pr-123`). `spawn.sh` rejects a name taken by a live Herdr agent.
+1. Pick the agent and a child name (example `review-pr-123`). In the herdr TUI, `spawn.sh` rejects a name taken by a live Herdr agent.
 2. Claude caller with a `claude` child: call `ListAgents`, read the first line `This session is <parent-name> [...]`, and check the child name is absent from the rows (messaging names are a separate namespace).
 3. Write the prompt file with your file-writing tool: the harness scratchpad if it has one, else `/tmp/herdr-spawn/<name>.md`. Content is a preamble plus the task (the handoff doc pointer for a handover, plus the lanes doc for parallel children).
 
@@ -66,7 +66,7 @@ The tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.
    <task>
    ```
 
-4. Run `<this skill's directory>/scripts/spawn.sh <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>`; on failure it names the pane, so read it with `herdr pane read` and report.
+4. Run `<this skill's directory>/scripts/spawn.sh <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
 5. Confirm the child took the task. Herdr children: read the pane; startup dialogs (Codex hook review, folder trust) can report `idle` or `unknown`, so the printed status alone proves nothing. Claude pair: its first message arrives or `ListAgents` shows the child. A dialog belongs to the user: tell them to answer it in that pane, naming the pane id.
 6. Report agent, pane id and name to the user.
 
@@ -76,7 +76,7 @@ Claude caller with a `claude` child:
 - Send work and follow-ups with `SendMessage` to `<child-name>`; use `notify_when_idle: true` to hear when it finishes. Replies arrive as `<cross-session-message from-name="<child-name>">`.
 - A child in a different permission mode holds your messages for the user's approval in its pane; a `[Cross-session delivery notice]` says so.
 
-Every other pair, and Claude pairs when preferred: the `herdr` skill (`herdr agent prompt`, `wait`, `read`).
+Every other pair, and Claude pairs when preferred: the `herdr` skill (`herdr agent prompt`, `wait`, `read`); in the Herdr app, `hc send`, `hc wait` and `hc read` with the printed terminal. `hc send` pastes its text as a prompt, so it can't run a child's slash commands.
 
 ## Rules
 

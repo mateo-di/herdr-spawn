@@ -4,7 +4,7 @@ A skill that lets a coding agent spawn another agent session (`claude`, `codex`,
 
 ## Requirements
 
-- Herdr 0.9.1 or newer, with the caller running inside a Herdr pane
+- Herdr 0.9.1 or newer, with the caller running inside a Herdr pane; or the Herdr app, with `herdr-app` and `hc` (herdr-core) on `PATH`
 - `jq`
 - A bash- or zsh-compatible shell in the pane (the launch line uses `$(cat …)`)
 - Recommended: the built-in Herdr skill, which covers prompting, waiting, reading and dialogs: `npx skills add herdrdev/herdr --skill herdr -g`
@@ -43,7 +43,7 @@ Ask in natural language:
 
 ## Coordination
 
-A Claude Code caller with a `claude` child talks to it through SendMessage in both directions. Every other pair uses Herdr (`herdr agent prompt`, `wait`, `read`), as described by the built-in `herdr` skill. A child that shows an approval or startup dialog waits for the user to answer it in its pane.
+A Claude Code caller with a `claude` child talks to it through SendMessage in both directions. Every other pair uses Herdr (`herdr agent prompt`, `wait`, `read`), as described by the built-in `herdr` skill, or in the Herdr app herdr-core (`hc send`, `wait`, `read`). A child that shows an approval or startup dialog waits for the user to answer it in its pane.
 
 ## Configuration
 
@@ -66,7 +66,7 @@ codex   my-codex-alias {prompt}
 gemini  gemini -i {prompt}
 ```
 
-The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead).
+The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead). In the Herdr app the new pane runs it with `$SHELL -ic`, for the same reason.
 
 ## License
 
