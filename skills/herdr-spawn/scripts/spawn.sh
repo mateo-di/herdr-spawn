@@ -58,8 +58,43 @@ promptarg="\"\$(cat $(printf %q "$promptfile"))\""
 launch=${template//"{name}"/"$name"}
 launch=${launch//"{prompt}"/"$promptarg"}
 
-[ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (HERDR_ENV != 1)"
 command -v jq >/dev/null || die "jq is required"
+
+# The Herdr app (herdr-core, `hc`) sets HC_TERMINAL_ID instead of HERDR_ENV. It shows no pane geometry, so
+# without a pane/direction the child splits the caller's pane to the right. The launch line runs in an
+# interactive instance of the user's shell (wrappers, aliases and functions apply), replaced by a plain
+# shell once the agent exits. A split doesn't take the person's focus.
+if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
+  command -v herdr-app >/dev/null || die "herdr-app is required"
+  command -v hc >/dev/null || die "hc (herdr-core) is required"
+  if [ $# -eq 5 ]; then
+    target=$4 dir=$5
+  else
+    target=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" \
+      '[.spaces[].tabs[].terminals[] | select(.terminal == $t) | .pane][0] // empty')
+    dir=right
+    [ -n "$target" ] || die "no pane shows terminal $HC_TERMINAL_ID; pass <pane-id> <right|down> (see herdr-app ls)"
+  fi
+  shell=${SHELL:-/bin/sh}
+  line="cd $(printf %q "$PWD") && $launch; exec $(printf %q "$shell")"
+  split=$(herdr-app do pane.split --pane "$target" --direction "$dir" \
+    --argv "$(jq -cn --arg sh "$shell" --arg line "$line" '[$sh, "-ic", $line]')") ||
+    die "split of $target failed: $split"
+  term=$(jq -r '.terminal // empty' <<<"$split")
+  [ -n "$term" ] || die "split of $target returned no terminal: $split"
+
+  status=
+  for _ in $(seq 120); do
+    status=$(hc get "$term" --json | jq -r 'select(.status.app) | "\(.status.app) \(.status.state)"') || true
+    [ -n "$status" ] && break
+    sleep 0.5
+  done
+  [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: hc read $term --lines 40"
+  echo "$term $name $status"
+  exit 0
+fi
+
+[ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (neither HERDR_ENV=1 nor HC_TERMINAL_ID)"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
 
 if [ $# -eq 5 ]; then
