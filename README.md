@@ -40,6 +40,11 @@ Ask in natural language:
 - "Open an opencode pane and have it write the migration tests."
 - "Hand this investigation to a new claude session." (writes a handoff doc first)
 - "Start three parallel workers, one per package." (writes a lanes doc first)
+- "Run these two tickets as driver lanes." (one tab and worktree per lane; each lane runs its task through subagents with `hierarchical-implementation` and reports its integrated result back)
+
+## Lanes
+
+A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus (herdr TUI or Herdr UI). Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
 
 ## Coordination
 
