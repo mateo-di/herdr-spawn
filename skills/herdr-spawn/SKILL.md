@@ -38,16 +38,22 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 
 ## Lanes
 
-A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt sets its mode under the preamble; a lane whose prompt names none is a unit:
+A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>` and register it with `--lane <unit|driver>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt also sets its mode under the preamble, for harnesses without a gate; a lane whose prompt names none is a unit:
 
 - `Lane mode: unit` executes one unit you review; it works directly.
 - `Lane mode: driver` owns a whole task: it runs it through `hierarchical-implementation` as the driver, with subagent workers, spawns no further sessions, and reports its integrated, verified result, which you review like a worker's.
 
 Pick `driver` when the task has several units; keep a lane to one task so its worktree has one owner.
 
+`--lane` needs `HERDR_PANE_ID` (your pane is the coordinator) and the herdr TUI or Herdr UI. It exports `LANE_MODE` and `LANE_COORDINATOR` in the lane's shell (a gate such as `hierarchical-implementation` reads `LANE_MODE`), tags the lane's pane with `lane_of` and `lane_mode`, and starts `scripts/lanes-watch.sh` once for your pane. The watcher posts `[lane <name>] done|blocked|exited ...` into your session as a prompt, only while you are idle; read a done lane's report as the notice says, and ask the user before answering a blocked one. Read the live table of your lanes with:
+
+```
+herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
+```
+
 ## Layout
 
-Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app, and does not combine with `<pane-id> <right|down>`.
+Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app, and does not combine with `<pane-id> <right|down>`. `--lane` combines with either.
 
 ## Steps
 
@@ -76,7 +82,7 @@ Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 �
    <task>
    ```
 
-4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
+4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] [--lane <unit|driver>] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
 5. Confirm the child took the task. Herdr children: read the pane; startup dialogs (Codex hook review, folder trust) can report `idle` or `unknown`, so the printed status alone proves nothing. Claude pair: its first message arrives or `ListAgents` shows the child. A dialog belongs to the user: tell them to answer it in that pane, naming the pane id.
 6. Report agent, pane id and name to the user.
 
