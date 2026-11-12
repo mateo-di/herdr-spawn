@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spawn.sh <agent> <name> <prompt-file> [<pane-id> <right|down>]
+# Usage: spawn.sh [--tab <dir>] <agent> <name> <prompt-file> [<pane-id> <right|down>]
 # Splits a sibling pane, types the agent's launch line into its interactive shell (so wrappers, aliases and
 # functions apply, and `$(cat file)` expands there), waits for Herdr to detect the agent, names it, and prints
 # "<pane-id> <name> <agent-kind> <status>". Without the optional pane/direction, a picker keeps the tab an even
@@ -7,6 +7,7 @@
 #   1. A column with fewer panes than the tallest column is filled first: split its largest pane "down".
 #   2. Otherwise every column has R panes. With C columns: C <= R adds a column ("right"), C > R a row ("down").
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
+# --tab <dir> (first argument, Herdr TUI/UI only, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app instead, leaves naming to the
 # launch template, and prints "<terminal> <name> <app> <state>"; see the block below the jq check.
 # Launch templates ({name}, {prompt}) come from built-in defaults, overridden or extended by the config file
@@ -47,7 +48,15 @@ pick() {
       end'
 }
 
-[ $# -eq 3 ] || [ $# -eq 5 ] || die "usage: spawn.sh <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+usage="usage: spawn.sh [--tab <dir>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+tabdir=
+if [ "${1:-}" = --tab ]; then
+  [ $# -ge 5 ] || die "$usage"
+  [ -d "$2" ] || die "--tab directory not found: $2"
+  tabdir=$(cd "$2" && pwd)
+  shift 2
+fi
+[ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
 [ -r "$promptfile" ] || die "prompt file not readable: $promptfile"
@@ -67,6 +76,7 @@ command -v jq >/dev/null || die "jq is required"
 # interactive instance of the user's shell (wrappers, aliases and functions apply), replaced by a plain
 # shell once the agent exits. A split doesn't take the person's focus.
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
+  [ -z "$tabdir" ] || die "--tab needs the herdr TUI or Herdr UI (HERDR_ENV=1)"
   command -v herdr-app >/dev/null || die "herdr-app is required"
   command -v hc >/dev/null || die "hc (herdr-core) is required"
   if [ $# -eq 5 ]; then
@@ -99,17 +109,24 @@ fi
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (neither HERDR_ENV=1 nor HC_TERMINAL_ID)"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
 
-if [ $# -eq 5 ]; then
-  target=$4 dir=$5
+if [ -n "$tabdir" ]; then
+  tabcmd=(herdr tab create)
+  [ -z "${HERDR_WORKSPACE_ID:-}" ] || tabcmd+=(--workspace "$HERDR_WORKSPACE_ID")
+  pane=$("${tabcmd[@]}" --cwd "$tabdir" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id')
+  { [ -n "$pane" ] && [ "$pane" != null ]; } || die "tab create returned no pane id"
 else
-  picked=$(pick) || die "could not pick a pane to split; pass <pane-id> <right|down>"
-  read -r target dir <<<"$picked"
-fi
-{ [ -n "${target:-}" ] && [ "$target" != null ] && [ -n "${dir:-}" ] && [ "$dir" != null ]; } ||
-  die "could not pick a pane to split; pass <pane-id> <right|down>"
+  if [ $# -eq 5 ]; then
+    target=$4 dir=$5
+  else
+    picked=$(pick) || die "could not pick a pane to split; pass <pane-id> <right|down>"
+    read -r target dir <<<"$picked"
+  fi
+  { [ -n "${target:-}" ] && [ "$target" != null ] && [ -n "${dir:-}" ] && [ "$dir" != null ]; } ||
+    die "could not pick a pane to split; pass <pane-id> <right|down>"
 
-pane=$(herdr pane split "$target" --direction "$dir" --cwd "$PWD" --no-focus | jq -r '.result.pane.pane_id')
-{ [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
+  pane=$(herdr pane split "$target" --direction "$dir" --cwd "$PWD" --no-focus | jq -r '.result.pane.pane_id')
+  { [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
+fi
 herdr pane run "$pane" "$launch" >/dev/null || die "launch failed; pane $pane left open"
 
 info=

@@ -34,10 +34,20 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 - Ownership: the resources only each child may change. Shared resources nobody changes while lanes run go in an "exclusive, later, serial" lane.
 - One writer per shared file: you write shared deliverables; each child writes its own results file and log plus proposed corrections, and you integrate them.
 - Each child reports to you after each block and asks the user in its own pane for anything needing approval. Your approval is never the user's approval.
+- A status table you alone keep current, one row per child: name, lane mode, pane id, worktree and branch, status (working, blocked, review, done). It is the record you and the user read after a restart or compaction, not the chat.
+
+## Lanes
+
+A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. Every lane's prompt sets its mode under the preamble:
+
+- `Lane mode: unit` executes one unit you review; it works directly.
+- `Lane mode: driver` owns a whole task: it runs it through `hierarchical-implementation` as the driver, with subagent workers, spawns no further sessions, and reports its integrated, verified result, which you review like a worker's.
+
+Pick `driver` when the task has several units; keep a lane to one task so its worktree has one owner.
 
 ## Layout
 
-The tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction.
+Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app.
 
 ## Steps
 
@@ -66,7 +76,7 @@ The tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.
    <task>
    ```
 
-4. Run `<this skill's directory>/scripts/spawn.sh <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
+4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
 5. Confirm the child took the task. Herdr children: read the pane; startup dialogs (Codex hook review, folder trust) can report `idle` or `unknown`, so the printed status alone proves nothing. Claude pair: its first message arrives or `ListAgents` shows the child. A dialog belongs to the user: tell them to answer it in that pane, naming the pane id.
 6. Report agent, pane id and name to the user.
 
