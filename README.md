@@ -44,7 +44,13 @@ Ask in natural language:
 
 ## Lanes
 
-A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus (herdr TUI or Herdr UI). Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
+A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> --lane <unit|driver> <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus (herdr TUI or Herdr UI). Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result); keep that line even with `--lane`, for harnesses without a gate. `--lane` also exports `LANE_MODE` and `LANE_COORDINATOR` to the lane and tags its pane (the `hierarchical-implementation` gate reads `LANE_MODE`). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
+
+`--lane` also starts one `lanes-watch.sh` per coordinator pane. It posts `[lane <name>] done`, `blocked` or `exited` notices into the coordinator as a prompt while the coordinator is idle (a blocked lane also raises a Herdr notification at once). The live status table:
+
+```bash
+herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
+```
 
 ## Coordination
 

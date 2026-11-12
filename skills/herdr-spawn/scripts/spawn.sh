@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spawn.sh [--tab <dir>] <agent> <name> <prompt-file> [<pane-id> <right|down>]
+# Usage: spawn.sh [--tab <dir>] [--lane <unit|driver>] <agent> <name> <prompt-file> [<pane-id> <right|down>]
 # Splits a sibling pane, types the agent's launch line into its interactive shell (so wrappers, aliases and
 # functions apply, and `$(cat file)` expands there), waits for Herdr to detect the agent, names it, and prints
 # "<pane-id> <name> <agent-kind> <status>". Without the optional pane/direction, a picker keeps the tab an even
@@ -7,7 +7,10 @@
 #   1. A column with fewer panes than the tallest column is filled first: split its largest pane "down".
 #   2. Otherwise every column has R panes. With C columns: C <= R adds a column ("right"), C > R a row ("down").
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
-# --tab <dir> (first argument, Herdr TUI/UI only, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
+# --tab <dir> (before the positionals, Herdr TUI/UI only, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
+# --lane <unit|driver> (before the positionals, Herdr TUI/UI only, needs HERDR_PANE_ID) registers the child as a lane of
+# the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of and lane_mode
+# metadata tokens, and lanes-watch.sh runs for the caller to post done/blocked/exited notices into it.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app instead, leaves naming to the
 # launch template, and prints "<terminal> <name> <app> <state>"; see the block below the jq check.
 # Launch templates ({name}, {prompt}) come from built-in defaults, overridden or extended by the config file
@@ -48,14 +51,22 @@ pick() {
       end'
 }
 
-usage="usage: spawn.sh [--tab <dir>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
-tabdir=
-if [ "${1:-}" = --tab ]; then
-  [ $# -ge 5 ] || die "$usage"
-  [ -d "$2" ] || die "--tab directory not found: $2"
-  tabdir=$(CDPATH='' cd -- "$2" && pwd)
-  shift 2
-fi
+usage="usage: spawn.sh [--tab <dir>] [--lane <unit|driver>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+tabdir="" lane=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --tab)
+      [ $# -ge 5 ] || die "$usage"
+      [ -d "$2" ] || die "--tab directory not found: $2"
+      tabdir=$(CDPATH='' cd -- "$2" && pwd)
+      shift 2 ;;
+    --lane)
+      [ $# -ge 5 ] || die "$usage"
+      case $2 in unit|driver) lane=$2 ;; *) die "--lane mode must be unit or driver, got: $2" ;; esac
+      shift 2 ;;
+    *) break ;;
+  esac
+done
 [ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
@@ -79,6 +90,7 @@ command -v jq >/dev/null || die "jq is required"
 # shell once the agent exits. A split doesn't take the person's focus.
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   [ -z "$tabdir" ] || die "--tab needs the herdr TUI or Herdr UI (HERDR_ENV=1)"
+  [ -z "$lane" ] || die "--lane needs the herdr TUI or Herdr UI (HERDR_ENV=1)"
   command -v herdr-app >/dev/null || die "herdr-app is required"
   command -v hc >/dev/null || die "hc (herdr-core) is required"
   if [ $# -eq 5 ]; then
@@ -109,6 +121,7 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
 fi
 
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (neither HERDR_ENV=1 nor HC_TERMINAL_ID)"
+[ -z "$lane" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "--lane needs HERDR_PANE_ID, the coordinator's pane"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
 
 if [ -n "$tabdir" ]; then
@@ -129,6 +142,9 @@ else
   pane=$(herdr pane split "$target" --direction "$dir" --cwd "$PWD" --no-focus | jq -r '.result.pane.pane_id')
   { [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
 fi
+if [ -n "$lane" ]; then
+  launch="export LANE_MODE=$(printf %q "$lane"); export LANE_COORDINATOR=$(printf %q "$HERDR_PANE_ID"); $launch"
+fi
 herdr pane run "$pane" "$launch" >/dev/null || die "launch failed; pane $pane left open"
 
 info=
@@ -141,4 +157,16 @@ done
 
 herdr agent rename "$pane" "$name" >/dev/null ||
   die "agent running in $pane but rename to $name failed (name taken?)"
+if [ -n "$lane" ]; then
+  herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$HERDR_PANE_ID" --token "lane_mode=$lane" >/dev/null ||
+    die "agent $name running in $pane but recording its lane tokens failed"
+  statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
+  mkdir -p "$statedir"
+  watchlog=$statedir/watch-${HERDR_PANE_ID//[!A-Za-z0-9_-]/_}.log
+  watch=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lanes-watch.sh
+  # Detached so the watcher outlives this script and the caller's tool call; it exits at once if one already runs.
+  detach='nohup'
+  if command -v setsid >/dev/null; then detach=setsid; fi
+  "$detach" "$watch" "$HERDR_PANE_ID" >>"$watchlog" 2>&1 </dev/null &
+fi
 jq -r --arg name "$name" '.result.agent | "\(.pane_id) \($name) \(.agent) \(.agent_status)"' <<<"$info"
