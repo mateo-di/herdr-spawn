@@ -6,6 +6,8 @@
 # (exited). Done is herdr's completion_seq counter rising, not a status: the status after a turn is idle or done
 # depending on whether anyone is looking at the pane, and a poll can miss a short working phase, but the counter
 # cannot be missed. A lane first seen with a completion_seq finished before the first poll and counts as done.
+# The turn of a launch-line prompt may get no completion_seq, so a lane still without one counts as done when it
+# goes from working or unknown to idle or done.
 # The last snapshot persists per coordinator, so a restarted watcher does not re-announce what it reported.
 # Notices queue in the state dir and are posted to the coordinator with `herdr agent prompt` only while it is
 # idle or done: some harnesses drop their in-progress reply when prompted mid-turn. A failed prompt keeps the
@@ -50,7 +52,9 @@ events() {
     | ($cur | map(.pane_id)) as $alive
     | ($cur[] | select((.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
                        or ($p[.pane_id] != null and $p[.pane_id].agent_status != .agent_status))
-       | if (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0) then
+       | if (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
+            or ((.completion_seq // 0) == 0 and ($p[.pane_id].agent_status | IN("working", "unknown"))
+                and (.agent_status | IN("idle", "done"))) then
            "done\t\(.name)\t[lane \(.name)] done \(where). Read its report: herdr agent read \(.name) --source recent-unwrapped --lines 120"
          elif .agent_status == "blocked" and $p[.pane_id] != null then
            "blocked\t\(.name)\t[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it."
