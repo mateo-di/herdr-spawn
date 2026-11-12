@@ -7,7 +7,8 @@
 # depending on whether anyone is looking at the pane, and a poll can miss a short working phase, but the counter
 # cannot be missed. A lane first seen with a completion_seq finished before the first poll and counts as done.
 # The turn of a launch-line prompt may get no completion_seq, so a lane still without one counts as done when it
-# goes from working or unknown to idle or done.
+# goes from working, unknown or blocked to idle or done. A lane entering blocked gets a blocked notice instead,
+# including one first seen blocked.
 # The last snapshot persists per coordinator, so a restarted watcher does not re-announce what it reported.
 # Notices queue in the state dir and are posted to the coordinator with `herdr agent prompt` only while it is
 # idle or done: some harnesses drop their in-progress reply when prompted mid-turn. A failed prompt keeps the
@@ -51,13 +52,14 @@ events() {
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
     | ($cur | map(.pane_id)) as $alive
     | ($cur[] | select((.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
-                       or ($p[.pane_id] != null and $p[.pane_id].agent_status != .agent_status))
-       | if (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
-            or ((.completion_seq // 0) == 0 and ($p[.pane_id].agent_status | IN("working", "unknown"))
+                       or $p[.pane_id].agent_status != .agent_status)
+       # blocked wins over done: a lane that finished a turn and is now waiting needs a person more than a reader
+       | if .agent_status == "blocked" then
+           "blocked\t\(.name)\t[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it."
+         elif (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
+            or ((.completion_seq // 0) == 0 and ($p[.pane_id].agent_status | IN("working", "unknown", "blocked"))
                 and (.agent_status | IN("idle", "done"))) then
            "done\t\(.name)\t[lane \(.name)] done \(where). Read its report: herdr agent read \(.name) --source recent-unwrapped --lines 120"
-         elif .agent_status == "blocked" and $p[.pane_id] != null then
-           "blocked\t\(.name)\t[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it."
          else empty end),
       ($prev[] | select(.pane_id as $id | $alive | index($id) | not)
        | "exited\t\(.name)\t[lane \(.name)] exited \(where).")'
@@ -82,8 +84,19 @@ deliver() {
 
 prev=$(cat "$seen" 2>/dev/null || true)
 [ -n "$prev" ] || prev='[]'
+failures=0
 while :; do
-  herdr pane get "$coord" >/dev/null 2>&1 || { log "coordinator pane $coord is gone"; rm -f "$seen"; exit 0; }
+  # pane_not_found ends the watcher at once; any other failure (a server reload, a busy socket) is retried for
+  # about five minutes, so a stopped server does not leave it running forever.
+  if ! err=$(herdr pane get "$coord" 2>&1 >/dev/null); then
+    case $err in *pane_not_found*) log "coordinator pane $coord is gone"; rm -f "$seen"; exit 0 ;; esac
+    failures=$((failures + 1))
+    log "herdr call failed ($failures), retrying: $err"
+    if [ $((failures * interval)) -ge 300 ]; then log "giving up after $failures failures"; exit 1; fi
+    sleep "$interval" & wait $!
+    continue
+  fi
+  failures=0
   if cur=$(herdr agent list 2>/dev/null | jq -c --arg c "$coord" '
       [.result.agents[] | select(.tokens.lane_of == $c)
        | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode}]') && [ -n "$cur" ]; then
