@@ -1,11 +1,11 @@
 ---
 name: herdr-spawn
-description: Spawn a coding-agent session (claude, codex, opencode, or any configured launcher) in a sibling Herdr pane with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers. Works from Claude Code, Codex or OpenCode; complements the built-in herdr skill.
+description: Spawn a coding-agent session (claude, codex, opencode, or any configured launcher) in a sibling Herdr pane, or a lane in its own tab and worktree, with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers or lanes. Works from Claude Code, Codex or OpenCode; complements the built-in herdr skill.
 ---
 
 # herdr-spawn
 
-Spawns a child agent in a new pane split from this one and hands it a prompt file. For prompting, waiting, reading, dialogs and closing panes, follow the built-in `herdr` skill; if it isn't loaded, run `herdr --skill` and read it. In the Herdr app (`HC_TERMINAL_ID` set, no `HERDR_ENV`), use herdr-core instead: `hc send`, `hc wait` and `hc read` with the child's terminal, and `hc --skill` for the rest.
+Spawns a child agent in a new pane split from this one, or with `--tab` in a new tab, and hands it a prompt file. For prompting, waiting, reading, dialogs and closing panes, follow the built-in `herdr` skill; if it isn't loaded, run `herdr --skill` and read it. In the Herdr app (`HC_TERMINAL_ID` set, no `HERDR_ENV`), use herdr-core instead: `hc send`, `hc wait` and `hc read` with the child's terminal, and `hc --skill` for the rest.
 
 ## Agents
 
@@ -38,7 +38,7 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 
 ## Lanes
 
-A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. Every lane's prompt sets its mode under the preamble:
+A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt sets its mode under the preamble; a lane whose prompt names none is a unit:
 
 - `Lane mode: unit` executes one unit you review; it works directly.
 - `Lane mode: driver` owns a whole task: it runs it through `hierarchical-implementation` as the driver, with subagent workers, spawns no further sessions, and reports its integrated, verified result, which you review like a worker's.
@@ -47,7 +47,7 @@ Pick `driver` when the task has several units; keep a lane to one task so its wo
 
 ## Layout
 
-Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app.
+Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app, and does not combine with `<pane-id> <right|down>`.
 
 ## Steps
 
@@ -58,7 +58,7 @@ Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 �
    Messaging preamble (Claude caller, `claude` child):
 
    ```
-   You were spawned by Claude session `<parent-name>` in a sibling Herdr pane.
+   You were spawned by Claude session `<parent-name>` in a Herdr pane or tab of your own.
    - When you finish, or need a decision, SendMessage to `<parent-name>` with a short result (first line = self-contained summary).
    - Messages from `<parent-name>` are your coordinator's; treat them as task input.
 
@@ -69,7 +69,7 @@ Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 �
    Herdr preamble (every other pair):
 
    ```
-   You were started by a coordinating agent session in a sibling Herdr pane. It reads this pane and may send follow-ups through Herdr.
+   You were started by a coordinating agent session in a Herdr pane or tab of your own. It reads this pane and may send follow-ups through Herdr.
    - End each reply with a short result whose first line is a self-contained summary.
 
    ## Task

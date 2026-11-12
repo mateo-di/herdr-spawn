@@ -53,13 +53,15 @@ tabdir=
 if [ "${1:-}" = --tab ]; then
   [ $# -ge 5 ] || die "$usage"
   [ -d "$2" ] || die "--tab directory not found: $2"
-  tabdir=$(cd "$2" && pwd)
+  tabdir=$(CDPATH='' cd -- "$2" && pwd)
   shift 2
 fi
 [ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
 [ -r "$promptfile" ] || die "prompt file not readable: $promptfile"
+# The child's shell may start in another directory (--tab), so it needs an absolute path.
+promptfile=$(CDPATH='' cd -- "$(dirname -- "$promptfile")" && pwd)/${promptfile##*/}
 
 template=$(templates | awk -v a="$agent" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
 if [ -z "$template" ]; then
