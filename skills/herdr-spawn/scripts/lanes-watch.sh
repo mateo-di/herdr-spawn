@@ -51,10 +51,9 @@ events() {
     def where: "(\(.agent), pane \(.pane_id), mode \(.mode // "unit"))";
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
     | ($cur | map(.pane_id)) as $alive
-    | ($cur[] | select((.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
-                       or $p[.pane_id].agent_status != .agent_status)
+    | ($cur[]
        # blocked wins over done: a lane that finished a turn and is now waiting needs a person more than a reader
-       | if .agent_status == "blocked" then
+       | if .agent_status == "blocked" and $p[.pane_id].agent_status != "blocked" then
            "blocked\t\(.name)\t[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it."
          elif (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
             or ((.completion_seq // 0) == 0 and ($p[.pane_id].agent_status | IN("working", "unknown", "blocked"))

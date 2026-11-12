@@ -165,10 +165,8 @@ if [ -n "$lane" ]; then
   watchlog=$statedir/watch-${HERDR_PANE_ID//[!A-Za-z0-9_-]/_}.log
   watch=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lanes-watch.sh
   # Detached so the watcher outlives this script and the caller's tool call; it exits at once if one already runs.
-  if command -v setsid >/dev/null; then
-    setsid "$watch" "$HERDR_PANE_ID" >>"$watchlog" 2>&1 </dev/null &
-  else
-    nohup "$watch" "$HERDR_PANE_ID" >>"$watchlog" 2>&1 </dev/null &
-  fi
+  detach='nohup'
+  if command -v setsid >/dev/null; then detach=setsid; fi
+  "$detach" "$watch" "$HERDR_PANE_ID" >>"$watchlog" 2>&1 </dev/null &
 fi
 jq -r --arg name "$name" '.result.agent | "\(.pane_id) \($name) \(.agent) \(.agent_status)"' <<<"$info"
