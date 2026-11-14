@@ -23,10 +23,13 @@ if [ -n "${LANE_MODE:-}" ]; then
   read -r st report < <(herdr agent get "$pane" 2>/dev/null |
     jq -r '.result.agent.tokens | "\(.lane_state // "-") \(.lane_report // "-")"') || st=-
   [ "$st" != working ] ||
-    reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, run: $dir/lane.sh done \"<result and where it is>\". If you are blocked on something only your coordinator can decide, run: $dir/lane.sh escalate \"<question, options, your recommendation>\". Otherwise keep working toward the goal."
+    reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, write the full report in your reply, then run: $dir/lane.sh done \"<one-line summary>\". If you are blocked on something only your coordinator can decide, write the full question with options and your recommendation, then run: $dir/lane.sh escalate \"<one-line summary>\". Otherwise keep working toward the goal."
 else
-  waiting=$(herdr agent list 2>/dev/null | jq -r --arg c "$pane" \
-    '[.result.agents[] | select(.tokens.lane_of == $c and .tokens.lane_state == "escalated") | .name] | join(", ")')
+  # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks.
+  read -r report waiting < <(herdr agent list 2>/dev/null | jq -r --arg c "$pane" '
+    [.result.agents[] | select(.tokens.lane_of == $c and .tokens.lane_state == "escalated")]
+    | "\(map("\(.name):\(.tokens.lane_report // "-")") | join(",") | if . == "" then "-" else . end) \(map(.name) | join(", "))"') ||
+    report=- waiting=''
   [ -z "$waiting" ] ||
     reason="Lanes waiting on your answer: $waiting. Answer each with: $dir/lane.sh reply <lane> \"<answer>\". Ask the human first only if the decision is critical and was never settled."
 fi
