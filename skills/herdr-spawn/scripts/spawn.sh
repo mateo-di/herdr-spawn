@@ -40,7 +40,7 @@ templates() {
   printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}' \
     'omp omp {prompt}' \
     'lane:claude claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
-    'lane:codex codex {slashgoal}' \
+    'lane:codex codex -c shell_environment_policy.inherit=all {slashgoal}' \
     'lane:opencode export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
     'lane:omp omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
 }

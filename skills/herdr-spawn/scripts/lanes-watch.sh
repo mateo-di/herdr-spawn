@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Usage: lanes-watch.sh <coordinator-pane-id>
-# Started detached by `spawn.sh --lane` and by `lane.sh`. A coordinator that spawned lanes otherwise learns nothing
+# Started detached by `spawn.sh --lane` and by `lane.sh reply`. A coordinator that spawned lanes otherwise learns nothing
 # until it reads their panes, so this polls `herdr agent list` for agents whose lane_of token is the coordinator's
-# pane. Lanes declare their own state in a lane_state token (working, done, escalated) through lane.sh, which also
-# queues the done and escalation notices; the watcher covers what a lane cannot say for itself:
+# pane. Lanes declare their own state in a lane_state token (working, done, escalated) through lane.sh, which only
+# talks to herdr, so no harness sandbox gets in its way. A new lane_report stamp on a lane that is done or
+# escalated is a declaration, announced with the lane's lane_note (a lane first seen with one counts as new). The
+# watcher also covers what a lane cannot say for itself:
 #   stopped   a lane finished a turn while its state is still working, so it went quiet without reporting.
 #   stalled   a lane has been working for ${HERDR_SPAWN_STALL_MINUTES:-30} minutes without finishing a turn; once per stretch.
-#   blocked   a lane entered blocked (first seen blocked included); also raises a Herdr notification at once,
-#             because a person may need to answer it. Blocked wins over stopped.
+#   blocked   a lane entered blocked (first seen blocked included). Blocked wins over stopped.
 #   exited    a lane's pane vanished.
 # A finished turn is herdr's completion_seq counter rising, not a status: the status after a turn is idle or done
 # depending on whether anyone is looking at the pane, and a poll can miss a short working phase, but the counter
@@ -16,10 +17,9 @@
 # unknown or blocked to idle or done.
 # The last snapshot, with the stall bookkeeping, persists per coordinator, so a restarted watcher does not
 # re-announce what it reported.
-# Notices queue in the state dir (lane.sh appends to the same file) and are posted to the coordinator with
-# `herdr agent prompt` only while it is idle or done: some harnesses drop their in-progress reply when prompted
-# mid-turn. Delivery moves the queue aside first, so a notice appended meanwhile is never lost; a failed prompt
-# puts its lines back in front.
+# Notices queue in the state dir and are posted to the coordinator with `herdr agent prompt` only while it is
+# idle or done: some harnesses drop their in-progress reply when prompted mid-turn. A failed prompt keeps the
+# queue. A blocked lane also raises a Herdr notification at once, because a person may need to answer it.
 # One watcher runs per coordinator pane (a mkdir lock, portable to macOS bash 3.2). It exits when the
 # coordinator's pane is gone, or when no lanes remain and the queue is empty. Poll interval:
 # ${HERDR_SPAWN_WATCH_INTERVAL:-5} seconds.
@@ -35,7 +35,6 @@ state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 key=${coord//[!A-Za-z0-9_-]/_}
 lock=$state/watch-$key.lock
 queue=$state/queue-$key.txt
-sending=$queue.sending
 seen=$state/seen-$key.json
 mkdir -p "$state"
 
@@ -76,51 +75,48 @@ events() {
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
     | ($cur | map(.pane_id)) as $alive
     | ($cur[]
+       | (if .report != null and .report != $p[.pane_id].report and (.state | IN("done", "escalated")) then
+            (.note // "" | gsub("[\r\n]+"; " ")) as $note
+            | if .state == "done" then
+                "done\t\(.name)\t[lane \(.name)] done: \($note). Read its report: \(read)"
+              else
+                "escalation\t\(.name)\t[lane \(.name)] escalation: \($note). Answer with: \($lanesh) reply \(.name) \"<answer>\""
+              end
+          else empty end),
+         (
        # blocked wins over stopped: a lane that finished a turn and is now waiting needs a person more than a reader
-       | if .agent_status == "blocked" and $p[.pane_id].agent_status != "blocked" then
+       if .agent_status == "blocked" and $p[.pane_id].agent_status != "blocked" then
            "blocked\t\(.name)\t[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it."
          elif (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
             or ((.completion_seq // 0) == 0 and ($p[.pane_id].agent_status | IN("working", "unknown", "blocked"))
                 and (.agent_status | IN("idle", "done"))) then
-           # a lane that reported done or escalated already queued its own notice
+           # a lane that declared done or escalated is announced by its report
            if .state == "working" then
              "stopped\t\(.name)\t[lane \(.name)] stopped without reporting done or escalating \(where). Check it: \(read); nudge it with: \($lanesh) reply \(.name) \"<what to do next>\""
            else empty end
          elif .notified and ($p[.pane_id].notified | not) then
            "stalled\t\(.name)\t[lane \(.name)] working for \(($stall / 60) | floor) min without finishing a turn \(where). Check it: \(read)"
-         else empty end),
+         else empty end)),
       ($prev[] | select(.pane_id as $id | $alive | index($id) | not)
        | "exited\t\(.name)\t[lane \(.name)] exited \(where).")'
 }
 
-# Puts a moved-aside queue back in front of anything appended since.
-requeue() {
-  { cat "$sending"; cat "$queue" 2>/dev/null || true; } >"$sending.merge"
-  mv "$sending.merge" "$queue"
-  rm -f "$sending"
-}
-
-# Posts the queue as one prompt when the coordinator is between turns; keeps it on any failure. The queue is
-# moved aside first because lane.sh appends to it at any time.
+# Posts the queue as one prompt when the coordinator is between turns; keeps it on any failure.
 deliver() {
   [ -s "$queue" ] || return 0
   local st line text=
   st=$(herdr agent get "$coord" 2>/dev/null | jq -r '.result.agent.agent_status // empty') || return 0
   case $st in idle|done) ;; *) return 0 ;; esac
-  mv "$queue" "$sending"
   while IFS= read -r line; do
     text=${text:+$text | }$line
-  done <"$sending"
+  done <"$queue"
   if herdr agent prompt "$coord" "$text" >/dev/null 2>&1; then
-    rm -f "$sending"
+    : >"$queue"
     log "delivered: $text"
   else
-    requeue
     log "prompt to $coord failed, queue kept"
   fi
 }
-
-[ ! -f "$sending" ] || requeue
 
 prev=$(cat "$seen" 2>/dev/null || true)
 [ -n "$prev" ] || prev='[]'
@@ -139,7 +135,7 @@ while :; do
   failures=0
   if cur=$(herdr agent list 2>/dev/null | jq -c --arg c "$coord" '
       [.result.agents[] | select(.tokens.lane_of == $c)
-       | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode, state: .tokens.lane_state}]') &&
+       | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode, state: .tokens.lane_state, note: .tokens.lane_note, report: .tokens.lane_report}]') &&
      [ -n "$cur" ] && cur=$(track "$prev" "$cur" "$(date +%s)"); then
     while IFS=$'\t' read -r kind name notice; do
       [ -n "$kind" ] || continue
