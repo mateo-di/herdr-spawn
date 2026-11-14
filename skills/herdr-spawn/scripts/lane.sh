@@ -3,10 +3,11 @@
 #       (in the coordinator): lane.sh reply <lane-name|pane> "<answer>"
 # A lane declares its state in the lane_state pane token (working, done, escalated) instead of the watcher
 # guessing it, and only talks to herdr: it writes no files, so no harness sandbox can get in the way. done and
-# escalate also set lane_note (the summary on one line, capped at 76 characters plus "..." because herdr cuts a token value at 79 silently); every call sets lane_report to a fresh stamp, which is how
-# lanes-watch.sh sees a new declaration and queues the notice. reply sends the coordinator's answer to a lane,
-# marks it working again and makes sure the coordinator's watcher runs. Needs HERDR_PANE_ID, LANE_COORDINATOR and
-# LANE_MODE in a lane (spawn.sh --lane exports the last two).
+# escalate also set lane_note (the summary on one line, capped at 76 characters plus "..." because herdr cuts a
+# token value at 79 silently); every call sets lane_report to a fresh stamp, which is how lanes-watch.sh sees a
+# new declaration and queues the notice. reply sends the coordinator's answer to a lane, marks it working again
+# and makes sure the coordinator's watcher runs. Needs HERDR_PANE_ID, LANE_COORDINATOR and LANE_MODE in a lane
+# (spawn.sh --lane exports the last two).
 set -euo pipefail
 
 die() { echo "lane.sh: $*" >&2; exit 1; }

@@ -65,7 +65,7 @@ pick() {
 }
 
 usage="usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal <objective>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
-tabdir="" lane="" goal="" goalset=
+tabdir="" lane="" goal=""
 while [ $# -gt 0 ]; do
   case $1 in
     --tab)
@@ -80,13 +80,13 @@ while [ $# -gt 0 ]; do
     --goal)
       [ $# -ge 5 ] || die "$usage"
       [ -n "$2" ] || die "--goal needs a non-empty objective"
-      goal=$2 goalset=1
+      goal=$2
       shift 2 ;;
     *) break ;;
   esac
 done
-[ -z "$goalset" ] || [ -n "$lane" ] || die "--goal needs --lane"
-[ -z "$lane" ] || [ -n "$goalset" ] || die "--lane needs --goal \"<objective with its done criterion>\""
+[ -z "$goal" ] || [ -n "$lane" ] || die "--goal needs --lane"
+[ -z "$lane" ] || [ -n "$goal" ] || die "--lane needs --goal \"<objective with its done criterion>\""
 [ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
