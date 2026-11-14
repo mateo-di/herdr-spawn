@@ -1,0 +1,16 @@
+{
+  "description": "Holds herdr-spawn lanes and their coordinator to their roles when they try to stop.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/lane-stop.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
