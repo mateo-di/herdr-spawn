@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Usage (in a lane):        lane.sh done "<summary>" | escalate "<question, options, your recommendation>" | working
+# Usage (in a lane):        lane.sh done "<one-line summary>" | escalate "<one-line summary>" | working
 #       (in the coordinator): lane.sh reply <lane-name|pane> "<answer>"
 # A lane declares its state in the lane_state pane token (working, done, escalated) instead of the watcher
 # guessing it, and only talks to herdr: it writes no files, so no harness sandbox can get in the way. done and
-# escalate also set lane_note (the text, on one line); every call sets lane_report to a fresh stamp, which is how
+# escalate also set lane_note (the summary on one line, capped at 76 characters plus "..." because herdr cuts a token value at 79 silently); every call sets lane_report to a fresh stamp, which is how
 # lanes-watch.sh sees a new declaration and queues the notice. reply sends the coordinator's answer to a lane,
 # marks it working again and makes sure the coordinator's watcher runs. Needs HERDR_PANE_ID, LANE_COORDINATOR and
 # LANE_MODE in a lane (spawn.sh --lane exports the last two).
 set -euo pipefail
 
 die() { echo "lane.sh: $*" >&2; exit 1; }
-usage="usage: lane.sh done \"<summary>\" | escalate \"<question>\" | working | reply <lane> \"<answer>\""
+usage="usage: lane.sh done \"<one-line summary>\" | escalate \"<one-line summary>\" | working | reply <lane> \"<answer>\""
 [ $# -ge 1 ] || die "$usage"
 cmd=$1
 command -v jq >/dev/null || die "jq is required"
@@ -23,6 +23,14 @@ set_state() { # <pane> <coordinator> <mode> <state> [--token k=v ...]
   herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$of" --token "lane_mode=$mode" \
     --token "lane_state=$state" --token "lane_report=$(date +%s)-$$-$RANDOM" "$@" >/dev/null ||
     die "could not record lane_state=$state on $pane"
+}
+
+# One line, capped so herdr's silent cut at 79 characters shows as "...".
+note() {
+  local t
+  t=$(printf '%s' "$1" | tr '\r\n' '  ')
+  if [ ${#t} -gt 79 ]; then t="${t:0:76}..."; fi
+  printf '%s' "$t"
 }
 
 case $cmd in
@@ -57,6 +65,6 @@ fi
 
 case $cmd in
   working) set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" working ;;
-  "done") set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" "done" --token "lane_note=$(printf '%s' "$2" | tr '\r\n' '  ')" ;;
-  escalate) set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" escalated --token "lane_note=$(printf '%s' "$2" | tr '\r\n' '  ')" ;;
+  "done") set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" "done" --token "lane_note=$(note "$2")" ;;
+  escalate) set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" escalated --token "lane_note=$(note "$2")" ;;
 esac

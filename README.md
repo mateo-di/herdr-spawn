@@ -50,7 +50,7 @@ A child that changes a repo gets its own worktree and its own tab: `spawn.sh --t
 
 A lane declares its state with `scripts/lane.sh`, which sets a `lane_state` pane token (`--lane` starts it at `working`):
 
-- In the lane: `lane.sh done "<summary>"` when finished, `lane.sh escalate "<question, options, your recommendation>"` to ask its coordinator, `lane.sh working` to resume by itself. `lane.sh` only talks to herdr and writes no files, so no harness sandbox blocks it; `done` and `escalate` set the notice text as a `lane_note` token and the watcher announces it.
+- In the lane: `lane.sh done "<one-line summary>"` when finished (the full report goes in the lane's reply), `lane.sh escalate "<one-line summary>"` to ask its coordinator (the full question, options and recommendation go in the reply), `lane.sh working` to resume by itself. `lane.sh` only talks to herdr and writes no files, so no harness sandbox blocks it; `done` and `escalate` set the notice text as a `lane_note` token and the watcher announces it.
 - In the coordinator: `lane.sh reply <lane> "<answer>"` sends the answer to the lane and sets it back to `working`.
 
 `--lane` also starts one `lanes-watch.sh` per coordinator pane (`lane.sh reply` starts it too if needed). It posts the queued notices into the coordinator as a prompt while the coordinator is idle, and adds `[lane <name>] stopped` (a turn ended with the lane still `working`, so it went quiet without reporting), `stalled` (working for `HERDR_SPAWN_STALL_MINUTES`, default 30, without finishing a turn; once per stretch), `blocked` (also a Herdr notification at once) and `exited`. The live status table:

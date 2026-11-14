@@ -80,7 +80,7 @@ events() {
             | if .state == "done" then
                 "done\t\(.name)\t[lane \(.name)] done: \($note). Read its report: \(read)"
               else
-                "escalation\t\(.name)\t[lane \(.name)] escalation: \($note). Answer with: \($lanesh) reply \(.name) \"<answer>\""
+                "escalation\t\(.name)\t[lane \(.name)] escalation: \($note). Read the full question: herdr agent read \(.name) --source recent-unwrapped --lines 80; answer with: \($lanesh) reply \(.name) \"<answer>\""
               end
           else empty end),
          (
