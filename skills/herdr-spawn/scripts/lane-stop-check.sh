@@ -7,7 +7,8 @@
 # lane_state is still working. A coordinator may not stop while one of its lanes waits on its answer. Working
 # lanes never hold a coordinator: waiting idle for notices is its normal state, and the watcher wakes it.
 # After three blocks in a row the stop goes through and the watcher's stopped notice takes over, rather than
-# spinning the agent; lane.sh resets the count.
+# spinning the agent. The count starts over when the lane's lane_report token changes (lane.sh, including a
+# coordinator's reply, sets a fresh one), so this script keeps the only file and lanes write none.
 set -uo pipefail
 
 pane=${HERDR_PANE_ID:-}
@@ -17,9 +18,10 @@ dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 count=$state/stopblock-${pane//[!A-Za-z0-9_-]/_}
 
-reason=
+reason='' report=-
 if [ -n "${LANE_MODE:-}" ]; then
-  st=$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.tokens.lane_state // empty')
+  read -r st report < <(herdr agent get "$pane" 2>/dev/null |
+    jq -r '.result.agent.tokens | "\(.lane_state // "-") \(.lane_report // "-")"') || st=-
   [ "$st" != working ] ||
     reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, run: $dir/lane.sh done \"<result and where it is>\". If you are blocked on something only your coordinator can decide, run: $dir/lane.sh escalate \"<question, options, your recommendation>\". Otherwise keep working toward the goal."
 else
@@ -30,8 +32,9 @@ else
 fi
 
 if [ -z "$reason" ]; then rm -f "$count"; exit 0; fi
-n=$(cat "$count" 2>/dev/null || echo 0)
+{ read -r n last <"$count"; } 2>/dev/null || n=0
+[ "${last:-}" = "$report" ] || n=0
 [ "$n" -lt 3 ] || exit 0
 mkdir -p "$state"
-echo $((n + 1)) >"$count"
+echo "$((n + 1)) $report" >"$count"
 printf '%s\n' "$reason"
