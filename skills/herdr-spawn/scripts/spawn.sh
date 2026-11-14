@@ -9,8 +9,8 @@
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
 # --tab <dir> (before the positionals, Herdr TUI/UI only, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
 # --lane <unit|driver> (before the positionals, Herdr TUI/UI only, needs HERDR_PANE_ID) registers the child as a lane of
-# the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of and lane_mode
-# metadata tokens, and lanes-watch.sh runs for the caller to post done/blocked/exited notices into it.
+# the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of, lane_mode and
+# lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's side of the protocol).
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app instead, leaves naming to the
 # launch template, and prints "<terminal> <name> <app> <state>"; see the block below the jq check.
 # Launch templates ({name}, {prompt}) come from built-in defaults, overridden or extended by the config file
@@ -158,7 +158,7 @@ done
 herdr agent rename "$pane" "$name" >/dev/null ||
   die "agent running in $pane but rename to $name failed (name taken?)"
 if [ -n "$lane" ]; then
-  herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$HERDR_PANE_ID" --token "lane_mode=$lane" >/dev/null ||
+  herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$HERDR_PANE_ID" --token "lane_mode=$lane" --token lane_state=working >/dev/null ||
     die "agent $name running in $pane but recording its lane tokens failed"
   statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
   mkdir -p "$statedir"

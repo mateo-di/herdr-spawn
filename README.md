@@ -46,7 +46,12 @@ Ask in natural language:
 
 A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> --lane <unit|driver> <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus (herdr TUI or Herdr UI). Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result); keep that line even with `--lane`, for harnesses without a gate. `--lane` also exports `LANE_MODE` and `LANE_COORDINATOR` to the lane and tags its pane (the `hierarchical-implementation` gate reads `LANE_MODE`). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
 
-`--lane` also starts one `lanes-watch.sh` per coordinator pane. It posts `[lane <name>] done`, `blocked` or `exited` notices into the coordinator as a prompt while the coordinator is idle (a blocked lane also raises a Herdr notification at once). The live status table:
+A lane declares its state with `scripts/lane.sh`, which sets a `lane_state` pane token (`--lane` starts it at `working`):
+
+- In the lane: `lane.sh done "<summary>"` when finished, `lane.sh escalate "<question, options, your recommendation>"` to ask its coordinator, `lane.sh working` to resume by itself. `done` and `escalate` also queue a notice for the coordinator.
+- In the coordinator: `lane.sh reply <lane> "<answer>"` sends the answer to the lane and sets it back to `working`.
+
+`--lane` also starts one `lanes-watch.sh` per coordinator pane (`lane.sh` starts it too if needed). It posts the queued notices into the coordinator as a prompt while the coordinator is idle, and adds `[lane <name>] stopped` (a turn ended with the lane still `working`, so it went quiet without reporting), `stalled` (working for `HERDR_SPAWN_STALL_MINUTES`, default 30, without finishing a turn; once per stretch), `blocked` (also a Herdr notification at once) and `exited`. The live status table:
 
 ```bash
 herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
