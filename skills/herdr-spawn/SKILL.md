@@ -51,6 +51,17 @@ Pick `driver` when the task has several units; keep a lane to one task so its wo
 herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
 ```
 
+### Coordinating lanes
+
+Spawning lanes makes you their coordinator. Your goal is every lane you spawned at `done`, its result verified and integrated; the lanes do the work and you keep them unblocked.
+
+- Brief each lane with one goal: a done criterion it can verify (a command that passes, a draft PR opened), the scope it must stay in, and the decisions the user already made.
+- Between notices, stay idle rather than polling; the watcher wakes you. A `done` notice means read, verify and integrate; `stopped` or `stalled` means read the lane and nudge it with `lane.sh reply`.
+- Answer escalations yourself, from the user's instructions, earlier decisions and the repo. When none of them settles it, pick the simplest option that can be undone, tell the lane why, and keep the choice consistent across lanes.
+- Ask the user only when a decision is irreversible or touches production, security, money or anything outside the repo, goes beyond what the user decided, or carries high impact and was never settled in this conversation. Ask once, with every open question and your recommendation for each, raise `herdr notification show "<title>" --body "<question>"`, and keep the other lanes moving meanwhile.
+
+Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop while it is still `working`, and you can't stop while a lane waits on your answer. Three blocks in a row let the stop through, and the watcher's `stopped` notice takes over. The Claude Code hook ships with this plugin. The OpenCode plugin and oh-my-pi extension in `adapters/` load in every lane through its template; Codex reads `hooks/lane-stop.sh` from its own hooks config. Install them in your own config to hold a coordinator in those harnesses too (README).
+
 ## Layout
 
 Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app, and does not combine with `<pane-id> <right|down>`. `--lane` combines with either.
