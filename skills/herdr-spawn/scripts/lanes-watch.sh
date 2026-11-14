@@ -29,6 +29,7 @@ set -euo pipefail
 coord=$1
 interval=${HERDR_SPAWN_WATCH_INTERVAL:-5}
 stall=$(( ${HERDR_SPAWN_STALL_MINUTES:-30} * 60 ))
+lanesh=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lane.sh
 
 state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 key=${coord//[!A-Za-z0-9_-]/_}
@@ -69,7 +70,7 @@ track() {
 
 # Reads the previous and current (tracked) snapshots; prints "<kind><TAB><name><TAB><notice>" per transition.
 events() {
-  jq -nr --argjson prev "$1" --argjson cur "$2" '
+  jq -nr --argjson prev "$1" --argjson cur "$2" --argjson stall "$stall" --arg lanesh "$lanesh" '
     def where: "(\(.agent), pane \(.pane_id), mode \(.mode // "unit"))";
     def read: "herdr agent read \(.name) --source recent-unwrapped --lines 120";
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
@@ -83,13 +84,13 @@ events() {
                 and (.agent_status | IN("idle", "done"))) then
            # a lane that reported done or escalated already queued its own notice
            if .state == "working" then
-             "stopped\t\(.name)\t[lane \(.name)] stopped without reporting done or escalating \(where). Check it: \(read); nudge it with: lane.sh reply \(.name) \"<what to do next>\""
+             "stopped\t\(.name)\t[lane \(.name)] stopped without reporting done or escalating \(where). Check it: \(read); nudge it with: \($lanesh) reply \(.name) \"<what to do next>\""
            else empty end
          elif .notified and ($p[.pane_id].notified | not) then
            "stalled\t\(.name)\t[lane \(.name)] working for \(($stall / 60) | floor) min without finishing a turn \(where). Check it: \(read)"
          else empty end),
       ($prev[] | select(.pane_id as $id | $alive | index($id) | not)
-       | "exited\t\(.name)\t[lane \(.name)] exited \(where).")' --argjson stall "$stall"
+       | "exited\t\(.name)\t[lane \(.name)] exited \(where).")'
 }
 
 # Puts a moved-aside queue back in front of anything appended since.

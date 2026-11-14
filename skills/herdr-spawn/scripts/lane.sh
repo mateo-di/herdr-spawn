@@ -8,11 +8,15 @@
 # exports the last two).
 set -euo pipefail
 
+statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 die() { echo "lane.sh: $*" >&2; exit 1; }
 usage="usage: lane.sh done \"<summary>\" | escalate \"<question>\" | working | reply <lane> \"<answer>\""
 [ $# -ge 1 ] || die "$usage"
 cmd=$1
 command -v jq >/dev/null || die "jq is required"
+
+# Any lane subcommand clears the stop-hook block counter of the lane it concerns.
+reset_stopblock() { rm -f "$statedir/stopblock-${1//[!A-Za-z0-9_-]/_}"; }
 
 # Re-sends all three tokens: correct whether a report merges or replaces a source's tokens.
 set_state() { # <pane> <coordinator> <mode> <state>
@@ -36,6 +40,7 @@ if [ "$cmd" = reply ]; then
   [ "$of" != - ] || die "$lane is not a lane (no lane_of token)"
   herdr agent prompt "$lane" "$3" >/dev/null || die "prompt to $lane was rejected (blocked?)"
   set_state "$pane" "$of" "$mode" working
+  reset_stopblock "$pane"
   exit 0
 fi
 
@@ -49,21 +54,22 @@ case $cmd in
   escalate) state=escalated ;;
 esac
 set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" "$state"
+reset_stopblock "$HERDR_PANE_ID"
 [ "$cmd" != working ] || exit 0
 
+lanesh=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lane.sh
 name=$(herdr agent get "$HERDR_PANE_ID" | jq -r '.result.agent.name // empty')
 [ -n "$name" ] || die "this pane has no agent name; was it spawned by spawn.sh?"
 text=$(printf '%s' "$2" | tr '\n' ' ')
-statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 mkdir -p "$statedir"
 key=${LANE_COORDINATOR//[!A-Za-z0-9_-]/_}
 if [ "$cmd" = "done" ]; then
   printf '[lane %s] done: %s. Read its report: herdr agent read %s --source recent-unwrapped --lines 120\n' "$name" "$text" "$name"
 else
-  printf '[lane %s] escalation: %s. Answer with: lane.sh reply %s "<answer>"\n' "$name" "$text" "$name"
+  printf '[lane %s] escalation: %s. Answer with: %s reply %s "<answer>"\n' "$name" "$text" "$lanesh" "$name"
 fi >>"$statedir/queue-$key.txt"
 
-watch=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lanes-watch.sh
+watch=$(dirname -- "$lanesh")/lanes-watch.sh
 detach='nohup'
 if command -v setsid >/dev/null; then detach=setsid; fi
 "$detach" "$watch" "$LANE_COORDINATOR" >>"$statedir/watch-$key.log" 2>&1 </dev/null &
