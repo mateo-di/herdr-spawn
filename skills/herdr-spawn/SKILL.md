@@ -1,6 +1,6 @@
 ---
 name: herdr-spawn
-description: Spawn a coding-agent session (claude, codex, opencode, or any configured launcher) in a sibling Herdr pane, or a lane in its own tab and worktree, with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers or lanes. Works from Claude Code, Codex or OpenCode; complements the built-in herdr skill.
+description: Spawn a coding-agent session (claude, codex, opencode, omp, or any configured launcher) in a sibling Herdr pane, or a lane in its own tab and worktree, with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers or lanes. Works from Claude Code, Codex, OpenCode or oh-my-pi; complements the built-in herdr skill.
 ---
 
 # herdr-spawn
@@ -9,7 +9,7 @@ Spawns a child agent in a new pane split from this one, or with `--tab` in a new
 
 ## Agents
 
-`scripts/spawn.sh` knows `claude`, `codex` and `opencode`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
+`scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
 
 Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent; lanes use the key `lane:<agent>`. Besides `{name}` and `{prompt}`, templates take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted. Example:
 
@@ -60,7 +60,7 @@ Spawning lanes makes you their coordinator. Your goal is every lane you spawned 
 - Answer escalations yourself, from the user's instructions, earlier decisions and the repo. When none of them settles it, pick the simplest option that can be undone, tell the lane why, and keep the choice consistent across lanes.
 - Ask the user only when a decision is irreversible or touches production, security, money or anything outside the repo, goes beyond what the user decided, or carries high impact and was never settled in this conversation. Ask once, with every open question and your recommendation for each, raise `herdr notification show "<title>" --body "<question>"`, and keep the other lanes moving meanwhile.
 
-Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop while it is still `working`, and you can't stop while a lane waits on your answer. Three blocks in a row let the stop through, and the watcher's `stopped` notice takes over. The Claude Code hook ships with this plugin. The OpenCode plugin and oh-my-pi extension in `adapters/` load in every lane through its template; Codex reads `hooks/lane-stop.sh` from its own hooks config. Install them in your own config to hold a coordinator in those harnesses too (README).
+Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop while it is still `working`, and you can't stop while a lane waits on your answer. Three blocks in a row let the stop through, and the watcher's `stopped` notice takes over. The Claude Code hook ships with this plugin, so it holds a Claude lane or coordinator whose session has the plugin installed. The OpenCode plugin and oh-my-pi extension in `adapters/` load in every lane through its template; Codex reads `hooks/lane-stop.sh` from its own hooks config. Install them in your own config to hold a coordinator in those harnesses too (README).
 
 ## Layout
 

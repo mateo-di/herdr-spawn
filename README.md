@@ -1,6 +1,6 @@
 # herdr-spawn
 
-A skill that lets a coding agent spawn another agent session (`claude`, `codex`, `opencode` or any CLI you name) in a sibling [Herdr](https://herdr.dev) pane with an initial prompt, keep the tab an even grid, and coordinate with the child afterwards. The caller can be Claude Code, Codex or OpenCode. It ships as a Claude Code plugin and as a plain skill folder.
+A skill that lets a coding agent spawn another agent session (`claude`, `codex`, `opencode`, `omp` or any CLI you name) in a sibling [Herdr](https://herdr.dev) pane with an initial prompt, keep the tab an even grid, and coordinate with the child afterwards. The caller can be Claude Code, Codex, OpenCode or oh-my-pi. It ships as a Claude Code plugin and as a plain skill folder.
 
 ## Requirements
 
