@@ -44,7 +44,9 @@ Ask in natural language:
 
 ## Lanes
 
-A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> --lane <unit|driver> <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus (herdr TUI or Herdr UI). Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result); keep that line even with `--lane`, for harnesses without a gate. `--lane` also exports `LANE_MODE` and `LANE_COORDINATOR` to the lane and tags its pane (the `hierarchical-implementation` gate reads `LANE_MODE`). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
+A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> --lane <unit|driver> --goal "<objective and done criterion>" <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus (herdr TUI or Herdr UI). Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result); keep that line even with `--lane`, for harnesses without a gate. `--lane` also exports `LANE_MODE` and `LANE_COORDINATOR` to the lane and tags its pane (the `hierarchical-implementation` gate reads `LANE_MODE`). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
+
+`--goal` is required with `--lane` and refused without it, so a lane always has a goal. `spawn.sh` composes the lane's prompt into `herdr-spawn`'s state dir as `lane-<name>.md`: the lane protocol, the goal, then your prompt file.
 
 A lane declares its state with `scripts/lane.sh`, which sets a `lane_state` pane token (`--lane` starts it at `working`):
 
@@ -70,8 +72,18 @@ A Claude Code caller with a `claude` child talks to it through SendMessage in bo
 | `claude` | `claude -n {name} {prompt}` |
 | `codex` | `codex {prompt}` |
 | `opencode` | `opencode --prompt {prompt}` |
+| `omp` | `omp {prompt}` |
 
-Override a default or add an agent in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (or the file named by `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`; blank lines and full-line `#` comments are ignored. `{name}` becomes the child's name and `{prompt}` becomes `"$(cat <prompt-file>)"`.
+With `--lane`, the `lane:<agent>` template is used instead; each holds the harness to the lane's goal natively:
+
+| Lane agent | Template |
+|---|---|
+| `lane:claude` | `claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}` |
+| `lane:codex` | `codex {slashgoal}` |
+| `lane:opencode` | `export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}` |
+| `lane:omp` | `omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts` |
+
+Override a default or add an agent in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (or the file named by `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`; blank lines and full-line `#` comments are ignored. `{name}` becomes the child's name and `{prompt}` becomes `"$(cat <prompt-file>)"`. Lane entries use the key `lane:<agent>` and also take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted.
 
 ```
 # a wrapper script

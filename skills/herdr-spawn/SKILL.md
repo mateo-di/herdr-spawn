@@ -11,7 +11,7 @@ Spawns a child agent in a new pane split from this one, or with `--tab` in a new
 
 `scripts/spawn.sh` knows `claude`, `codex` and `opencode`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
 
-Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent:
+Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent; lanes use the key `lane:<agent>`. Besides `{name}` and `{prompt}`, templates take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted. Example:
 
 ```
 claude  my-claude-wrapper -n {name} {prompt}
@@ -38,7 +38,7 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 
 ## Lanes
 
-A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>` and register it with `--lane <unit|driver>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt also sets its mode under the preamble, for harnesses without a gate; a lane whose prompt names none is a unit:
+A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>` and register it with `--lane <unit|driver> --goal "<objective and its done criterion>"`. The goal is required with `--lane` and refused without it; `spawn.sh` composes the lane's prompt (lane protocol, goal, then your prompt file) and launches it from the `lane:<agent>` template, so the harness holds the lane to the goal. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt also sets its mode under the preamble, for harnesses without a gate; a lane whose prompt names none is a unit:
 
 - `Lane mode: unit` executes one unit you review; it works directly.
 - `Lane mode: driver` owns a whole task: it runs it through `hierarchical-implementation` as the driver, with subagent workers, spawns no further sessions, and reports its integrated, verified result, which you review like a worker's.
@@ -82,7 +82,7 @@ Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 �
    <task>
    ```
 
-4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] [--lane <unit|driver>] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
+4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] [--lane <unit|driver> --goal "<objective>"] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
 5. Confirm the child took the task. Herdr children: read the pane; startup dialogs (Codex hook review, folder trust) can report `idle` or `unknown`, so the printed status alone proves nothing. Claude pair: its first message arrives or `ListAgents` shows the child. A dialog belongs to the user: tell them to answer it in that pane, naming the pane id.
 6. Report agent, pane id and name to the user.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spawn.sh [--tab <dir>] [--lane <unit|driver>] <agent> <name> <prompt-file> [<pane-id> <right|down>]
+# Usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal "<objective>"] <agent> <name> <prompt-file> [<pane-id> <right|down>]
 # Splits a sibling pane, types the agent's launch line into its interactive shell (so wrappers, aliases and
 # functions apply, and `$(cat file)` expands there), waits for Herdr to detect the agent, names it, and prints
 # "<pane-id> <name> <agent-kind> <status>". Without the optional pane/direction, a picker keeps the tab an even
@@ -11,11 +11,17 @@
 # --lane <unit|driver> (before the positionals, Herdr TUI/UI only, needs HERDR_PANE_ID) registers the child as a lane of
 # the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of, lane_mode and
 # lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's side of the protocol).
+# --goal "<objective with its done criterion>" is required with --lane and refused without it: a lane always has a
+# goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
+# the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app instead, leaves naming to the
 # launch template, and prints "<terminal> <name> <app> <state>"; see the block below the jq check.
-# Launch templates ({name}, {prompt}) come from built-in defaults, overridden or extended by the config file
+# Launch templates come from built-in defaults, overridden or extended by the config file
 # ${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}: one "<agent> <template>" per
-# line; blank lines and full-line # comments are ignored.
+# line; blank lines and full-line # comments are ignored. With --lane the key is `lane:<agent>`. Placeholders,
+# each shell-quoted: {name}, {prompt} (reads the prompt file), {promptfile}, {goal}, {slashgoal} (a /goal line
+# pointing at the prompt file), {adapters} (the repo's adapters dir), {occonfig} (an OpenCode config file that
+# loads the lane plugin, written only when the template uses it).
 set -euo pipefail
 
 die() { echo "spawn.sh: $*" >&2; exit 1; }
@@ -31,7 +37,12 @@ templates() {
       printf '%s %s\n' "$a" "$t"
     done <"$conf"
   fi
-  printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}'
+  printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}' \
+    'omp omp {prompt}' \
+    'lane:claude claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
+    'lane:codex codex {slashgoal}' \
+    'lane:opencode export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
+    'lane:omp omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
 }
 
 pick() {
@@ -51,8 +62,8 @@ pick() {
       end'
 }
 
-usage="usage: spawn.sh [--tab <dir>] [--lane <unit|driver>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
-tabdir="" lane=""
+usage="usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal <objective>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+tabdir="" lane="" goal="" goalset=
 while [ $# -gt 0 ]; do
   case $1 in
     --tab)
@@ -64,9 +75,16 @@ while [ $# -gt 0 ]; do
       [ $# -ge 5 ] || die "$usage"
       case $2 in unit|driver) lane=$2 ;; *) die "--lane mode must be unit or driver, got: $2" ;; esac
       shift 2 ;;
+    --goal)
+      [ $# -ge 5 ] || die "$usage"
+      [ -n "$2" ] || die "--goal needs a non-empty objective"
+      goal=$2 goalset=1
+      shift 2 ;;
     *) break ;;
   esac
 done
+[ -z "$goalset" ] || [ -n "$lane" ] || die "--goal needs --lane"
+[ -z "$lane" ] || [ -n "$goalset" ] || die "--lane needs --goal \"<objective with its done criterion>\""
 [ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
@@ -74,13 +92,43 @@ agent=$1 name=$2 promptfile=$3
 # The child's shell may start in another directory (--tab), so it needs an absolute path.
 promptfile=$(CDPATH='' cd -- "$(dirname -- "$promptfile")" && pwd)/${promptfile##*/}
 
-template=$(templates | awk -v a="$agent" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
+statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
+scriptdir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
+if [ -n "$lane" ]; then
+  # The lane's prompt: protocol (with lane.sh's absolute path), the goal, then the caller's brief.
+  mkdir -p "$statedir"
+  protocol=$(cat "$scriptdir/../lane-protocol.md")
+  lanesh=$scriptdir/lane.sh
+  {
+    printf '%s\n\n## Goal\n\n%s\n\n## Brief\n\n' "${protocol//LANE_SH/$lanesh}" "$goal"
+    cat "$promptfile"
+  } >"$statedir/lane-$name.md"
+  promptfile=$statedir/lane-$name.md
+  key=lane:$agent
+else
+  key=$agent
+fi
+
+template=$(templates | awk -v a="$key" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
 if [ -z "$template" ]; then
-  die "unknown agent '$agent'; known: $(templates | awk '{print $1}' | sort -u | paste -sd' ' -); add one to $conf"
+  if [ -n "$lane" ]; then
+    die "unknown lane agent '$agent'; known: $(templates | awk '/^lane:/ { sub(/^lane:/, "", $1); print $1 }' | sort -u | paste -sd' ' -); add lane:$agent to $conf"
+  fi
+  die "unknown agent '$agent'; known: $(templates | awk '$1 !~ /^lane:/ { print $1 }' | sort -u | paste -sd' ' -); add one to $conf"
 fi
 promptarg="\"\$(cat $(printf %q "$promptfile"))\""
 launch=${template//"{name}"/"$name"}
 launch=${launch//"{prompt}"/"$promptarg"}
+launch=${launch//"{promptfile}"/$(printf %q "$promptfile")}
+launch=${launch//"{goal}"/$(printf %q "$goal")}
+launch=${launch//"{slashgoal}"/$(printf %q "/goal $goal (brief: $promptfile)")}
+launch=${launch//"{adapters}"/$(printf %q "$adapters")}
+case $template in *"{occonfig}"*)
+  mkdir -p "$statedir"
+  jq -n --arg p "file://$adapters/opencode/herdr-lanes" '{plugins: [$p]}' >"$statedir/lane-$name-opencode.json"
+  launch=${launch//"{occonfig}"/$(printf %q "$statedir/lane-$name-opencode.json")} ;;
+esac
 
 command -v jq >/dev/null || die "jq is required"
 
@@ -160,10 +208,8 @@ herdr agent rename "$pane" "$name" >/dev/null ||
 if [ -n "$lane" ]; then
   herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$HERDR_PANE_ID" --token "lane_mode=$lane" --token lane_state=working >/dev/null ||
     die "agent $name running in $pane but recording its lane tokens failed"
-  statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
-  mkdir -p "$statedir"
   watchlog=$statedir/watch-${HERDR_PANE_ID//[!A-Za-z0-9_-]/_}.log
-  watch=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lanes-watch.sh
+  watch=$scriptdir/lanes-watch.sh
   # Detached so the watcher outlives this script and the caller's tool call; it exits at once if one already runs.
   detach='nohup'
   if command -v setsid >/dev/null; then detach=setsid; fi
