@@ -47,8 +47,15 @@ if [ "$cmd" = reply ]; then
   info=$(herdr agent get "$lane") || die "no agent $lane"
   read -r pane of mode < <(jq -r '.result.agent | "\(.pane_id) \(.tokens.lane_of // "-") \(.tokens.lane_mode // "-")"' <<<"$info")
   [ "$of" != - ] || die "$lane is not a lane (no lane_of token)"
-  herdr agent prompt "$lane" "$3" >/dev/null || die "prompt to $lane was rejected (blocked?)"
+  # Working first, so the watcher never sees the answered lane as still escalated or done; undone if the prompt fails.
   set_state "$pane" "$of" "$mode" working
+  if ! herdr agent prompt "$lane" "$3" >/dev/null; then
+    herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$of" --token "lane_mode=$mode" \
+      --token "lane_state=$(jq -r '.result.agent.tokens.lane_state // ""' <<<"$info")" \
+      --token "lane_report=$(jq -r '.result.agent.tokens.lane_report // ""' <<<"$info")" \
+      --token "lane_note=$(jq -r '.result.agent.tokens.lane_note // ""' <<<"$info")" >/dev/null || true
+    die "prompt to $lane was rejected (blocked?); its state is unchanged"
+  fi
   statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
   mkdir -p "$statedir"
   # Detached so the watcher outlives this script; it exits at once if one already runs.

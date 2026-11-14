@@ -6,20 +6,20 @@
 # talks to herdr, so no harness sandbox gets in its way. A new lane_report stamp on a lane that is done or
 # escalated is a declaration, announced with the lane's lane_note (a lane first seen with one counts as new). The
 # watcher also covers what a lane cannot say for itself:
-#   stopped   a lane finished a turn while its state is still working, so it went quiet without reporting.
-#   stalled   a lane has been working for ${HERDR_SPAWN_STALL_MINUTES:-30} minutes without finishing a turn; once per stretch.
-#   blocked   a lane entered blocked (first seen blocked included). Blocked wins over stopped.
+#   stopped   a lane whose state is still working has had an idle or done agent for ${HERDR_SPAWN_STOP_GRACE:-60}
+#             seconds: it went quiet without reporting. The grace absorbs a stop hook, goal judge or plugin that
+#             re-prompts the lane at the end of a turn; once per idle stretch, and a lane first seen idle counts.
+#   stalled   a lane has been working for ${HERDR_SPAWN_STALL_MINUTES:-30} minutes without finishing a turn (herdr's
+#             completion_seq counter not rising); once per stretch.
+#   blocked   a lane entered blocked (first seen blocked included).
 #   exited    a lane's pane vanished.
-# A finished turn is herdr's completion_seq counter rising, not a status: the status after a turn is idle or done
-# depending on whether anyone is looking at the pane, and a poll can miss a short working phase, but the counter
-# cannot be missed. A lane first seen with a completion_seq finished before the first poll. The turn of a
-# launch-line prompt may get no completion_seq, so a lane still without one finished when it goes from working,
-# unknown or blocked to idle or done.
-# The last snapshot, with the stall bookkeeping, persists per coordinator, so a restarted watcher does not
+# The last snapshot, with the stall and idle bookkeeping, persists per coordinator, so a restarted watcher does not
 # re-announce what it reported.
 # Notices queue in the state dir and are posted to the coordinator with `herdr agent prompt` only while it is
-# idle or done: some harnesses drop their in-progress reply when prompted mid-turn. A failed prompt keeps the
-# queue. A blocked lane also raises a Herdr notification at once, because a person may need to answer it.
+# idle or done: some harnesses drop their in-progress reply when prompted mid-turn. A queued line carries its
+# lane, kind and report, and delivery drops what went stale while the coordinator was busy: an escalation the
+# coordinator already answered, a stopped or stalled lane that is working again. A failed prompt keeps the queue.
+# A blocked lane also raises a Herdr notification at once, because a person may need to answer it.
 # One watcher runs per coordinator pane (a mkdir lock, portable to macOS bash 3.2). It exits when the
 # coordinator's pane is gone, or when no lanes remain and the queue is empty. Poll interval:
 # ${HERDR_SPAWN_WATCH_INTERVAL:-5} seconds.
@@ -29,6 +29,7 @@ set -euo pipefail
 coord=$1
 interval=${HERDR_SPAWN_WATCH_INTERVAL:-5}
 stall=$(( ${HERDR_SPAWN_STALL_MINUTES:-30} * 60 ))
+grace=${HERDR_SPAWN_STOP_GRACE:-60}
 lanesh=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)/lane.sh
 
 state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
@@ -44,7 +45,11 @@ if ! mkdir "$lock" 2>/dev/null; then
   sleep 1
   pid=$(cat "$lock/pid" 2>/dev/null || true)
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then exit 0; fi
-  rm -rf "$lock"
+  # Two launches can read the same dead pid: only one may move the lock away, and only while it still holds
+  # that pid, so the loser cannot remove the winner's fresh lock; a failed mkdir then exits.
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$pid" ] && mv "$lock" "$lock.stale.$$" 2>/dev/null; then
+    rm -rf "$lock.stale.$$"
+  fi
   mkdir "$lock" 2>/dev/null || exit 0
 fi
 echo $$ >"$lock/pid"
@@ -54,63 +59,77 @@ trap 'exit 0' INT TERM
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 
-# Adds the stall bookkeeping to a current snapshot: since (epoch the lane's working stretch began, null outside
-# one) and notified (the stretch has reached the stall threshold). A stretch is a lane whose state is working and
-# whose agent is working with an unchanged completion_seq. Args: previous snapshot, current snapshot, now.
+# Adds the bookkeeping to a current snapshot. since/notified: the stall stretch (a lane whose state is working
+# and whose agent is working with an unchanged completion_seq; since is null outside one, notified once it has
+# lasted the stall threshold). idle_since/stopped: the idle stretch (state working, agent idle or done; stopped
+# once it has lasted the grace). Args: previous snapshot, current snapshot, now.
 track() {
-  jq -c --argjson prev "$1" --argjson now "$3" --argjson stall "$stall" '
+  jq -c --argjson prev "$1" --argjson now "$3" --argjson stall "$stall" --argjson grace "$grace" '
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
     | map($p[.pane_id] as $o
       | (.state == "working" and (.agent_status | IN("working", "unknown"))) as $on
+      | (.state == "working" and (.agent_status | IN("idle", "done"))) as $idle
       | (if $on then (if $o.since != null and $o.completion_seq == .completion_seq then $o.since else $now end)
          else null end) as $since
-      | . + {since: $since, notified: ($on and ($now - $since >= $stall))})' <<<"$2"
+      | (if $idle then ($o.idle_since // $now) else null end) as $isince
+      | . + {since: $since, notified: ($on and ($now - $since >= $stall)),
+             idle_since: $isince, stopped: ($idle and ($now - $isince >= $grace))})' <<<"$2"
 }
 
-# Reads the previous and current (tracked) snapshots; prints "<kind><TAB><name><TAB><notice>" per transition.
+# Reads the previous and current (tracked) snapshots; prints "<kind> <name> <pane> <report or -> <notice>",
+# tab-separated, per transition.
 events() {
   jq -nr --argjson prev "$1" --argjson cur "$2" --argjson stall "$stall" --arg lanesh "$lanesh" '
     def where: "(\(.agent), pane \(.pane_id), mode \(.mode // "unit"))";
     def read: "herdr agent read \(.name) --source recent-unwrapped --lines 120";
+    def row($kind; $text): [$kind, .name, .pane_id, (.report // "-"), $text] | join("\t");
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
     | ($cur | map(.pane_id)) as $alive
     | ($cur[]
        | (if .report != null and .report != $p[.pane_id].report and (.state | IN("done", "escalated")) then
             (.note // "" | gsub("[\r\n]+"; " ")) as $note
             | if .state == "done" then
-                "done\t\(.name)\t[lane \(.name)] done: \($note). Read its report: \(read)"
+                row("done"; "[lane \(.name)] done: \($note). Read its report: \(read)")
               else
-                "escalation\t\(.name)\t[lane \(.name)] escalation: \($note). Read the full question: herdr agent read \(.name) --source recent-unwrapped --lines 80; answer with: \($lanesh) reply \(.name) \"<answer>\""
+                row("escalation"; "[lane \(.name)] escalation: \($note). Read the full question: herdr agent read \(.name) --source recent-unwrapped --lines 80; answer with: \($lanesh) reply \(.name) \"<answer>\"")
               end
           else empty end),
-         (
-       # blocked wins over stopped: a lane that finished a turn and is now waiting needs a person more than a reader
-       if .agent_status == "blocked" and $p[.pane_id].agent_status != "blocked" then
-           "blocked\t\(.name)\t[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it."
-         elif (.completion_seq // 0) > ($p[.pane_id].completion_seq // 0)
-            or ((.completion_seq // 0) == 0 and ($p[.pane_id].agent_status | IN("working", "unknown", "blocked"))
-                and (.agent_status | IN("idle", "done"))) then
-           # a lane that declared done or escalated is announced by its report
-           if .state == "working" then
-             "stopped\t\(.name)\t[lane \(.name)] stopped without reporting done or escalating \(where). Check it: \(read); nudge it with: \($lanesh) reply \(.name) \"<what to do next>\""
-           else empty end
-         elif .notified and ($p[.pane_id].notified | not) then
-           "stalled\t\(.name)\t[lane \(.name)] working for \(($stall / 60) | floor) min without finishing a turn \(where). Check it: \(read)"
-         else empty end)),
+         (if .agent_status == "blocked" and $p[.pane_id].agent_status != "blocked" then
+            row("blocked"; "[lane \(.name)] blocked on an approval or question \(where). Inspect: herdr agent read \(.name) --source recent-unwrapped --lines 60; ask the user before answering it.")
+          elif .stopped and ($p[.pane_id].stopped | not) then
+            row("stopped"; "[lane \(.name)] stopped without reporting done or escalating \(where). Check it: \(read); nudge it with: \($lanesh) reply \(.name) \"<what to do next>\"")
+          elif .notified and ($p[.pane_id].notified | not) then
+            row("stalled"; "[lane \(.name)] working for \(($stall / 60) | floor) min without finishing a turn \(where). Check it: \(read)")
+          else empty end)),
       ($prev[] | select(.pane_id as $id | $alive | index($id) | not)
-       | "exited\t\(.name)\t[lane \(.name)] exited \(where).")'
+       | row("exited"; "[lane \(.name)] exited \(where)."))'
+}
+
+# Queue lines are "<kind> <pane> <report> <text>", tab-separated. Prints the texts still worth sending, joined,
+# judged against the current snapshot: an escalation is stale once its lane is no longer escalated under that
+# report, a stopped or stalled lane once it is working again.
+fresh_text() {
+  jq -nrR --argjson cur "$prev" '
+    [inputs | split("\t") as $f
+     | ($cur | map(select(.pane_id == $f[1]))[0]) as $l
+     | select(if $f[0] == "escalation" then $l != null and $l.state == "escalated" and $l.report == $f[2]
+              elif $f[0] == "stopped" then $l != null and $l.state == "working" and ($l.agent_status | IN("idle", "done"))
+              elif $f[0] == "stalled" then $l != null and $l.state == "working"
+              else true end)
+     | $f[3:] | join("\t")] | join(" | ")' <"$queue"
 }
 
 # Posts the queue as one prompt when the coordinator is between turns; keeps it on any failure.
 deliver() {
   [ -s "$queue" ] || return 0
-  local st line text=
+  local st text
   st=$(herdr agent get "$coord" 2>/dev/null | jq -r '.result.agent.agent_status // empty') || return 0
   case $st in idle|done) ;; *) return 0 ;; esac
-  while IFS= read -r line; do
-    text=${text:+$text | }$line
-  done <"$queue"
-  if herdr agent prompt "$coord" "$text" >/dev/null 2>&1; then
+  text=$(fresh_text) || return 0
+  if [ -z "$text" ]; then
+    : >"$queue"
+    log "dropped a stale queue"
+  elif herdr agent prompt "$coord" "$text" >/dev/null 2>&1; then
     : >"$queue"
     log "delivered: $text"
   else
@@ -137,9 +156,9 @@ while :; do
       [.result.agents[] | select(.tokens.lane_of == $c)
        | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode, state: .tokens.lane_state, note: .tokens.lane_note, report: .tokens.lane_report}]') &&
      [ -n "$cur" ] && cur=$(track "$prev" "$cur" "$(date +%s)"); then
-    while IFS=$'\t' read -r kind name notice; do
+    while IFS=$'\t' read -r kind name pane report notice; do
       [ -n "$kind" ] || continue
-      printf '%s\n' "$notice" >>"$queue"
+      printf '%s\t%s\t%s\t%s\n' "$kind" "$pane" "$report" "$notice" >>"$queue"
       log "queued: $notice"
       if [ "$kind" = blocked ]; then
         herdr notification show "Lane $name needs input" --body "$notice" --sound request >/dev/null 2>&1 || true
