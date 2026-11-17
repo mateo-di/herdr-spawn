@@ -1,7 +1,7 @@
 {
   "name": "herdr-spawn",
-  "version": "1.0.0",
-  "description": "Spawn a claude, codex or opencode session in a sibling Herdr pane with an initial prompt, then coordinate with it.",
+  "version": "1.1.0",
+  "description": "Spawn a claude, codex, opencode or omp session in a sibling Herdr pane, or a lane with a goal in its own tab, then coordinate with it.",
   "author": {
     "name": "mateo-di",
     "url": "https://github.com/mateo-di"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: spawn.sh [--tab <dir>] <agent> <name> <prompt-file> [<pane-id> <right|down>]
+# Usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal "<objective>"] <agent> <name> <prompt-file> [<pane-id> <right|down>]
 # Splits a sibling pane, types the agent's launch line into its interactive shell (so wrappers, aliases and
 # functions apply, and `$(cat file)` expands there), waits for Herdr to detect the agent, names it, and prints
 # "<pane-id> <name> <agent-kind> <status>". Without the optional pane/direction, a picker keeps the tab an even
@@ -7,13 +7,24 @@
 #   1. A column with fewer panes than the tallest column is filled first: split its largest pane "down".
 #   2. Otherwise every column has R panes. With C columns: C <= R adds a column ("right"), C > R a row ("down").
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
-# --tab <dir> (first argument, Herdr TUI/UI only, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
+# --tab <dir> (before the positionals, Herdr TUI/UI only, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
+# --lane <unit|driver> (before the positionals, Herdr TUI/UI only, needs HERDR_PANE_ID) registers the child as a lane of
+# the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of, lane_mode and
+# lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's side of the protocol).
+# --goal "<objective with its done criterion>" is required with --lane and refused without it: a lane always has a
+# goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
+# the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app instead, leaves naming to the
 # launch template, and prints "<terminal> <name> <app> <state>"; see the block below the jq check.
-# Launch templates ({name}, {prompt}) come from built-in defaults, overridden or extended by the config file
+# Launch templates come from built-in defaults, overridden or extended by the config file
 # ${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}: one "<agent> <template>" per
-# line; blank lines and full-line # comments are ignored.
+# line; blank lines and full-line # comments are ignored. With --lane the key is `lane:<agent>`. Placeholders,
+# each shell-quoted: {name}, {prompt} (reads the prompt file), {promptfile}, {goal}, {slashgoal} (a /goal line
+# pointing at the prompt file), {adapters} (the repo's adapters dir), {occonfig} (an OpenCode config file that
+# loads the lane plugin, written only when the template uses it).
 set -euo pipefail
+# bash 5.2 expands "&" in a ${var//pat/repl} replacement to the match; this script replaces text only where a path is inserted.
+shopt -u patsub_replacement 2>/dev/null || true
 
 die() { echo "spawn.sh: $*" >&2; exit 1; }
 
@@ -28,7 +39,12 @@ templates() {
       printf '%s %s\n' "$a" "$t"
     done <"$conf"
   fi
-  printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}'
+  printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}' \
+    'omp omp {prompt}' \
+    'lane:claude claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
+    'lane:codex codex -c shell_environment_policy.inherit=all {slashgoal}' \
+    'lane:opencode export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
+    'lane:omp omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
 }
 
 pick() {
@@ -48,14 +64,29 @@ pick() {
       end'
 }
 
-usage="usage: spawn.sh [--tab <dir>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
-tabdir=
-if [ "${1:-}" = --tab ]; then
-  [ $# -ge 5 ] || die "$usage"
-  [ -d "$2" ] || die "--tab directory not found: $2"
-  tabdir=$(CDPATH='' cd -- "$2" && pwd)
-  shift 2
-fi
+usage="usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal <objective>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+tabdir="" lane="" goal=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --tab)
+      [ $# -ge 5 ] || die "$usage"
+      [ -d "$2" ] || die "--tab directory not found: $2"
+      tabdir=$(CDPATH='' cd -- "$2" && pwd)
+      shift 2 ;;
+    --lane)
+      [ $# -ge 5 ] || die "$usage"
+      case $2 in unit|driver) lane=$2 ;; *) die "--lane mode must be unit or driver, got: $2" ;; esac
+      shift 2 ;;
+    --goal)
+      [ $# -ge 5 ] || die "$usage"
+      [ -n "$2" ] || die "--goal needs a non-empty objective"
+      goal=$2
+      shift 2 ;;
+    *) break ;;
+  esac
+done
+[ -z "$goal" ] || [ -n "$lane" ] || die "--goal needs --lane"
+[ -z "$lane" ] || [ -n "$goal" ] || die "--lane needs --goal \"<objective with its done criterion>\""
 [ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
@@ -63,13 +94,49 @@ agent=$1 name=$2 promptfile=$3
 # The child's shell may start in another directory (--tab), so it needs an absolute path.
 promptfile=$(CDPATH='' cd -- "$(dirname -- "$promptfile")" && pwd)/${promptfile##*/}
 
-template=$(templates | awk -v a="$agent" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
-if [ -z "$template" ]; then
-  die "unknown agent '$agent'; known: $(templates | awk '{print $1}' | sort -u | paste -sd' ' -); add one to $conf"
+statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
+scriptdir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
+if [ -n "$lane" ]; then
+  # The lane launches from a composed prompt file, written once the name is known to be free.
+  callerprompt=$promptfile
+  promptfile=$statedir/lane-$name.md
+  key=lane:$agent
+else
+  key=$agent
 fi
-promptarg="\"\$(cat $(printf %q "$promptfile"))\""
-launch=${template//"{name}"/"$name"}
-launch=${launch//"{prompt}"/"$promptarg"}
+
+template=$(templates | awk -v a="$key" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
+if [ -z "$template" ]; then
+  if [ -n "$lane" ]; then
+    die "unknown lane agent '$agent'; known: $(templates | awk '/^lane:/ { sub(/^lane:/, "", $1); print $1 }' | sort -u | paste -sd' ' -); add lane:$agent to $conf"
+  fi
+  die "unknown agent '$agent'; known: $(templates | awk '$1 !~ /^lane:/ { print $1 }' | sort -u | paste -sd' ' -); add one to $conf"
+fi
+# Fills the template's placeholders in one pass, so substituted text (a goal that itself holds "{name}") is
+# never scanned again and every inserted value is shell-quoted.
+expand() {
+  local rest=$1 out=
+  while [[ $rest == *"{"* ]]; do
+    out+=${rest%%"{"*}
+    rest=${rest#*"{"}
+    case $rest in
+      "name}"*) out+=$name; rest=${rest#"name}"} ;;
+      "prompt}"*) out+="\"\$(cat $(printf %q "$promptfile"))\""; rest=${rest#"prompt}"} ;;
+      "promptfile}"*) out+=$(printf %q "$promptfile"); rest=${rest#"promptfile}"} ;;
+      "goal}"*) out+=$(printf %q "$goal"); rest=${rest#"goal}"} ;;
+      "slashgoal}"*) out+=$(printf %q "/goal $goal (brief: $promptfile)"); rest=${rest#"slashgoal}"} ;;
+      "adapters}"*) out+=$(printf %q "$adapters"); rest=${rest#"adapters}"} ;;
+      "occonfig}"*)
+        mkdir -p "$statedir"
+        jq -n --arg p "file://$adapters/opencode/herdr-lanes" '{plugins: [$p]}' >"$statedir/lane-$name-opencode.json"
+        out+=$(printf %q "$statedir/lane-$name-opencode.json"); rest=${rest#"occonfig}"} ;;
+      *) out+="{" ;;
+    esac
+  done
+  printf '%s' "$out$rest"
+}
+launch=$(expand "$template")
 
 command -v jq >/dev/null || die "jq is required"
 
@@ -79,6 +146,7 @@ command -v jq >/dev/null || die "jq is required"
 # shell once the agent exits. A split doesn't take the person's focus.
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   [ -z "$tabdir" ] || die "--tab needs the herdr TUI or Herdr UI (HERDR_ENV=1)"
+  [ -z "$lane" ] || die "--lane needs the herdr TUI or Herdr UI (HERDR_ENV=1)"
   command -v herdr-app >/dev/null || die "herdr-app is required"
   command -v hc >/dev/null || die "hc (herdr-core) is required"
   if [ $# -eq 5 ]; then
@@ -109,7 +177,17 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
 fi
 
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (neither HERDR_ENV=1 nor HC_TERMINAL_ID)"
+[ -z "$lane" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "--lane needs HERDR_PANE_ID, the coordinator's pane"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
+if [ -n "$lane" ]; then
+  # The lane's prompt: protocol (with lane.sh's absolute path), the goal, then the caller's brief.
+  mkdir -p "$statedir"
+  protocol=$(cat "$scriptdir/../lane-protocol.md")
+  {
+    printf '%s\n\n## Goal\n\n%s\n\n## Brief\n\n' "${protocol//LANE_SH/$scriptdir/lane.sh}" "$goal"
+    cat "$callerprompt"
+  } >"$promptfile"
+fi
 
 if [ -n "$tabdir" ]; then
   tabcmd=(herdr tab create)
@@ -129,6 +207,13 @@ else
   pane=$(herdr pane split "$target" --direction "$dir" --cwd "$PWD" --no-focus | jq -r '.result.pane.pane_id')
   { [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
 fi
+if [ -n "$lane" ]; then
+  # Registered before the agent starts, so a lane that reports at once is never overwritten by a late report.
+  herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$HERDR_PANE_ID" --token "lane_mode=$lane" \
+    --token lane_state=working --token "lane_report=$(date +%s)-$$-$RANDOM" >/dev/null ||
+    die "recording the lane tokens on pane $pane failed, pane left open"
+  launch="export LANE_MODE=$(printf %q "$lane"); export LANE_COORDINATOR=$(printf %q "$HERDR_PANE_ID"); $launch"
+fi
 herdr pane run "$pane" "$launch" >/dev/null || die "launch failed; pane $pane left open"
 
 info=
@@ -141,4 +226,12 @@ done
 
 herdr agent rename "$pane" "$name" >/dev/null ||
   die "agent running in $pane but rename to $name failed (name taken?)"
+if [ -n "$lane" ]; then
+  watchlog=$statedir/watch-${HERDR_PANE_ID//[!A-Za-z0-9_-]/_}.log
+  watch=$scriptdir/lanes-watch.sh
+  # Detached so the watcher outlives this script and the caller's tool call; it exits at once if one already runs.
+  detach='nohup'
+  if command -v setsid >/dev/null; then detach=setsid; fi
+  "$detach" "$watch" "$HERDR_PANE_ID" >>"$watchlog" 2>&1 </dev/null &
+fi
 jq -r --arg name "$name" '.result.agent | "\(.pane_id) \($name) \(.agent) \(.agent_status)"' <<<"$info"

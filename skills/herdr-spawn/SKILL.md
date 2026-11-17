@@ -1,6 +1,6 @@
 ---
 name: herdr-spawn
-description: Spawn a coding-agent session (claude, codex, opencode, or any configured launcher) in a sibling Herdr pane, or a lane in its own tab and worktree, with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers or lanes. Works from Claude Code, Codex or OpenCode; complements the built-in herdr skill.
+description: Spawn a coding-agent session (claude, codex, opencode, omp, or any configured launcher) in a sibling Herdr pane, or a lane in its own tab and worktree, with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers or lanes. Works from Claude Code, Codex, OpenCode or oh-my-pi; complements the built-in herdr skill.
 ---
 
 # herdr-spawn
@@ -9,9 +9,9 @@ Spawns a child agent in a new pane split from this one, or with `--tab` in a new
 
 ## Agents
 
-`scripts/spawn.sh` knows `claude`, `codex` and `opencode`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
+`scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
 
-Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent:
+Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent; lanes use the key `lane:<agent>`. Besides `{name}` and `{prompt}`, templates take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted. Example:
 
 ```
 claude  my-claude-wrapper -n {name} {prompt}
@@ -38,16 +38,33 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 
 ## Lanes
 
-A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>`. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt sets its mode under the preamble; a lane whose prompt names none is a unit:
+A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>` and register it with `--lane <unit|driver> --goal "<objective and its done criterion>"`. The goal is required with `--lane` and refused without it; `spawn.sh` composes the lane's prompt (lane protocol, goal, then your prompt file) and launches it from the `lane:<agent>` template, so the harness holds the lane to the goal. The lane's tab is its own; panes for its tests, servers or a reviewer go there. In the herdr-core app, which `--tab` does not support, spawn it as a pane and make the task's first step `cd <worktree>`. Every lane's prompt also sets its mode under the preamble, for harnesses without a gate; a lane whose prompt names none is a unit:
 
 - `Lane mode: unit` executes one unit you review; it works directly.
 - `Lane mode: driver` owns a whole task: it runs it through `hierarchical-implementation` as the driver, with subagent workers, spawns no further sessions, and reports its integrated, verified result, which you review like a worker's.
 
 Pick `driver` when the task has several units; keep a lane to one task so its worktree has one owner.
 
+`--lane` needs `HERDR_PANE_ID` (your pane is the coordinator) and the herdr TUI or Herdr UI. It exports `LANE_MODE` and `LANE_COORDINATOR` in the lane's shell (a gate such as `hierarchical-implementation` reads `LANE_MODE`), tags the lane's pane with `lane_of` and `lane_mode`, sets `lane_state=working`, and starts `scripts/lanes-watch.sh` once for your pane. A lane declares its state with `scripts/lane.sh`: `done "<one-line summary>"`, `escalate "<one-line summary>"` or `working`; the full report or question stays in the lane's own output, which the notice tells you how to read. You answer an escalation, or nudge a stopped lane, with `lane.sh reply <lane> "<answer>"`, which also sets it back to working. Notices reach your session as a prompt, only while you are idle: `[lane <name>] done|escalation` (the lane's own declaration, carried in herdr tokens, no files), and `stopped` (the lane is still working but its agent has been idle for `HERDR_SPAWN_STOP_GRACE` seconds, default 60, without done or escalate), `stalled` (working `HERDR_SPAWN_STALL_MINUTES`, default 30, without finishing a turn), `blocked` and `exited`. Read a done or stopped lane's report as the notice says; an escalation is yours to answer, but ask the user before answering a blocked lane. Read the live table of your lanes with:
+
+```
+herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
+```
+
+### Coordinating lanes
+
+Spawning lanes makes you their coordinator. Your goal is every lane you spawned at `done`, its result verified and integrated; the lanes do the work and you keep them unblocked.
+
+- Brief each lane with one goal: a done criterion it can verify (a command that passes, a draft PR opened), the scope it must stay in, and the decisions the user already made.
+- Between notices, stay idle rather than polling; the watcher wakes you. A `done` notice means read, verify and integrate; `stopped` or `stalled` means read the lane and nudge it with `lane.sh reply`.
+- Answer escalations yourself, from the user's instructions, earlier decisions and the repo. When none of them settles it, pick the simplest option that can be undone, tell the lane why, and keep the choice consistent across lanes.
+- Ask the user only when a decision is irreversible or touches production, security, money or anything outside the repo, goes beyond what the user decided, or carries high impact and was never settled in this conversation. Ask once, with every open question and your recommendation for each, raise `herdr notification show "<title>" --body "<question>"`, and keep the other lanes moving meanwhile.
+
+Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop while it is still `working`, and you can't stop while a lane waits on your answer. Three blocks in a row let the stop through, and the watcher's `stopped` notice takes over. The Claude Code hook ships with this plugin, so it holds a Claude lane or coordinator whose session has the plugin installed. The OpenCode plugin and oh-my-pi extension in `adapters/` load in every lane through its template; Codex reads `hooks/lane-stop.sh` from its own hooks config. Install them in your own config to hold a coordinator in those harnesses too (README).
+
 ## Layout
 
-Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app, and does not combine with `<pane-id> <right|down>`.
+Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace, labelled with the child's name, without taking the user's focus; it needs the herdr TUI or Herdr UI (`HERDR_ENV=1`), not the herdr-core app, and does not combine with `<pane-id> <right|down>`. `--lane` combines with either.
 
 ## Steps
 
@@ -76,7 +93,7 @@ Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 �
    <task>
    ```
 
-4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
+4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] [--lane <unit|driver> --goal "<objective>"] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
 5. Confirm the child took the task. Herdr children: read the pane; startup dialogs (Codex hook review, folder trust) can report `idle` or `unknown`, so the printed status alone proves nothing. Claude pair: its first message arrives or `ListAgents` shows the child. A dialog belongs to the user: tell them to answer it in that pane, naming the pane id.
 6. Report agent, pane id and name to the user.
 
