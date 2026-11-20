@@ -8,14 +8,15 @@
 #   2. Otherwise every column has R panes. With C columns: C <= R adds a column ("right"), C > R a row ("down").
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
 # --tab <dir> (before the positionals, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
-# --lane <unit|driver> (before the positionals, needs HERDR_PANE_ID) registers the child as a lane of
+# --lane <unit|driver> (before the positionals, needs HERDR_PANE_ID, or HC_TERMINAL_ID in the app) registers the child as a lane of
 # the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of, lane_mode and
 # lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's side of the protocol).
 # --goal "<objective with its done criterion>" is required with --lane and refused without it: a lane always has a
 # goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
-# In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it launches through hc run (a tab when --tab is given),
-# leaves naming to the launch template, and prints "<terminal> <name> <app> <state>"; see the block below the jq check.
+# In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app, or with --tab or --lane starts an
+# hc terminal of the caller's space (lane state in hc labels, no watcher), and prints "<terminal> <name> <app> <state>";
+# see the block below the jq check.
 # Launch templates come from built-in defaults, overridden or extended by the config file
 # ${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}: one "<agent> <template>" per
 # line; blank lines and full-line # comments are ignored. With --lane the key is `lane:<agent>`. Placeholders,
@@ -159,8 +160,6 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   command -v herdr-app >/dev/null || die "herdr-app is required"
   command -v hc >/dev/null || die "hc (herdr-core) is required"
   if [ -n "$tabdir" ] || [ -n "$lane" ]; then
-    # --tab or --lane in the app: launch through hc run, a terminal of the caller's space (a new tab when
-    # --tab names one, the caller's tab otherwise); --lane tags it as a lane of the coordinator.
     if hc get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
     where=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" \
       '.spaces[] | .id as $sid | .tabs[]? | select((.terminals // []) | map(.terminal) | index($t) != null) | "\($sid) \(.id)"')
