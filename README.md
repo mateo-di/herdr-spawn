@@ -2,6 +2,10 @@
 
 A skill that lets a coding agent spawn another agent session (`claude`, `codex`, `opencode`, `omp` or any CLI you name) in a sibling [Herdr](https://herdr.dev) pane with an initial prompt, keep the tab an even grid, and coordinate with the child afterwards. The caller can be Claude Code, Codex, OpenCode or oh-my-pi. It ships as a Claude Code plugin and as a plain skill folder.
 
+An Opus coordinator in the Herdr app runs two tickets as driver lanes, each in its own tab and worktree. Each lane hands the code to a Sonnet worker and reports done to the coordinator, which checks the work:
+
+![An Opus coordinator spawns two Opus lanes in the Herdr app; each lane runs a Sonnet worker and reports done](docs/demo.gif)
+
 ## Requirements
 
 - Herdr 0.9.1 or newer, with the caller running inside a Herdr pane; or the Herdr app, with `herdr-app` and `hc` (herdr-core) on `PATH`
