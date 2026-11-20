@@ -66,7 +66,7 @@ Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop wh
 
 ## Layout
 
-Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. The Herdr app shows no pane geometry, so there the child splits your pane to the right unless you pass a pane id from `herdr-app ls` and a direction. `--tab` opens a new tab in your workspace (in the Herdr app, your space), labelled with the child's name, without taking the user's focus, and does not combine with `<pane-id> <right|down>`. `--lane` combines with either.
+Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. In the Herdr app the child joins your tab on the right as your sub-agent, nested under you in the agents list; without `--lane`, a pane id from `herdr-app ls` and a direction split that pane instead, and that child shows on its own in the list. `--tab` opens a new tab in your workspace (in the Herdr app, your space), labelled with the child's name, without taking the user's focus, and does not combine with `<pane-id> <right|down>`. `--lane` combines with either.
 
 ## Steps
 

@@ -15,9 +15,9 @@
 # --goal "<objective with its done criterion>" is required with --lane and refused without it: a lane always has a
 # goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
-# In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it splits through herdr-app, or with --tab or --lane starts an
-# hc terminal of the caller's space (lane state in hc labels, no watcher), and prints "<terminal> <name> <app> <state>";
-# see the block below the jq check.
+# In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it starts the child as an hc terminal of the caller (lane state
+# in hc labels, no watcher), or with <pane-id> <right|down> and no --lane splits that pane through herdr-app, and
+# prints "<terminal> <name> <app> <state>"; see the block below the jq check.
 # Launch templates come from built-in defaults, overridden or extended by the config file
 # ${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}: one "<agent> <template>" per
 # line; blank lines and full-line # comments are ignored. With --lane the key is `lane:<agent>`. Placeholders,
@@ -152,15 +152,16 @@ compose_lane() {
   } >"$promptfile"
 }
 
-# The Herdr app (herdr-core, `hc`) sets HC_TERMINAL_ID instead of HERDR_ENV. It shows no pane geometry, so
-# without a pane/direction the child splits the caller's pane to the right; --tab or --lane launches through
-# hc run instead, as a terminal of the caller's space. The launch line runs in an interactive instance of the
-# user's shell (wrappers, aliases and functions apply), replaced by a plain shell once the agent exits. A split
-# doesn't take the person's focus.
+# The Herdr app (herdr-core, `hc`) sets HC_TERMINAL_ID instead of HERDR_ENV. The child launches through hc run
+# as the caller's child, so the agents list nests it under the caller: a pane of the caller's tab, or with --tab
+# a tab of its space. Only hc run records a parent, so a split (an explicit <pane-id> <right|down> without
+# --lane) is the one spawn the list shows on its own. The launch line runs in an interactive instance of the
+# user's shell (wrappers, aliases and functions apply), replaced by a plain shell once the agent exits. An hc run
+# child doesn't take the person's focus; a split does.
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   command -v herdr-app >/dev/null || die "herdr-app is required"
   command -v hc >/dev/null || die "hc (herdr-core) is required"
-  if [ -n "$tabdir" ] || [ -n "$lane" ]; then
+  if [ $# -eq 3 ] || [ -n "$lane" ]; then
     if hc get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
     where=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" \
       '.spaces[] | .id as $sid | .tabs[]? | select((.terminals // []) | map(.terminal) | index($t) != null) | "\($sid) \(.id)"')
@@ -196,14 +197,7 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     echo "$term $name $status"
     exit 0
   fi
-  if [ $# -eq 5 ]; then
-    target=$4 dir=$5
-  else
-    target=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" \
-      '[.spaces[].tabs[].terminals[] | select(.terminal == $t) | .pane][0] // empty')
-    dir=right
-    [ -n "$target" ] || die "no pane shows terminal $HC_TERMINAL_ID; pass <pane-id> <right|down> (see herdr-app ls)"
-  fi
+  target=$4 dir=$5
   shell=${SHELL:-/bin/sh}
   line="cd $(printf %q "$PWD") && $launch; exec $(printf %q "$shell")"
   split=$(herdr-app do pane.split --pane "$target" --direction "$dir" \
