@@ -8,9 +8,10 @@
 #   2. Otherwise every column has R panes. With C columns: C <= R adds a column ("right"), C > R a row ("down").
 # Columns are panes grouped by left edge (rect.x). The caller's pane wins ties within 10% area.
 # --tab <dir> (before the positionals, not with <pane-id> <right|down>) opens a new tab with cwd <dir> instead.
-# --lane <unit|driver> (before the positionals, needs HERDR_PANE_ID, or HC_TERMINAL_ID in the app) registers the child as a lane of
-# the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets lane_of, lane_mode and
-# lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's side of the protocol).
+# --lane <unit|driver> (before the positionals, needs HERDR_PANE_ID, or HC_TERMINAL_ID in the app) registers the
+# child as a lane of the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets
+# lane_of, lane_mode and lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's
+# side of the protocol).
 # --goal "<objective with its done criterion>" is required with --lane and refused without it: a lane always has a
 # goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.

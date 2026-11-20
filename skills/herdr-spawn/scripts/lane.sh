@@ -108,11 +108,10 @@ if [ "$app" = 1 ]; then
   fi
   state="done"
   if [ "$cmd" = escalate ]; then state=escalated; fi
-  n=$(note "$2")
+  n=$(printf '%s' "$2" | tr '\r\n' '  ')
   app_state "$HC_TERMINAL_ID" "$LANE_COORDINATOR" "$LANE_MODE" "$state" "lane_note=$n"
   name=$(hc get "$HC_TERMINAL_ID" --json 2>/dev/null | jq -r '.name // empty' 2>/dev/null) || name=''
   [ -n "$name" ] || name=$HC_TERMINAL_ID
-  n=$(printf '%s' "$2" | tr '\r\n' '  ')
   if [ "$cmd" = "done" ]; then
     msg="[lane $name] done: $n. Read its report: hc read $name --lines 120"
   else
