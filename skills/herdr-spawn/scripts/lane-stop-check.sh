@@ -43,13 +43,11 @@ if [ -n "${LANE_MODE:-}" ]; then
 else
   # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks.
   if [ "$app" = 1 ]; then
-    lanes='[]'
-    for t in $(hc ls --json 2>/dev/null | jq -r --arg c "$pane" '.terminals[] | select(.parent == $c) | .address'); do
-      lanes=$(hc get "$t" --json 2>/dev/null | jq -c --argjson acc "$lanes" '$acc + [.]') || true
-    done
-    read -r report waiting < <(jq -r --arg c "$pane" '
+    read -r report waiting < <(for t in $(hc ls --json 2>/dev/null | jq -r --arg c "$pane" '.terminals[] | select(.parent == $c) | .address'); do
+      hc get "$t" --json 2>/dev/null
+    done | jq -rs --arg c "$pane" '
       [.[] | select(.labels.lane_of == $c and .labels.lane_state == "escalated")]
-      | "\(map("\(.name):\(.labels.lane_report // "-")") | join(",") | if . == "" then "-" else . end) \(map(.name) | join(", "))"' <<<"$lanes") ||
+      | "\(map("\(.name):\(.labels.lane_report // "-")") | join(",") | if . == "" then "-" else . end) \(map(.name) | join(", "))"') ||
       report=- waiting=''
   else
     read -r report waiting < <(herdr agent list 2>/dev/null | jq -r --arg c "$pane" '
@@ -69,7 +67,9 @@ if [ "$n" -ge 3 ]; then
     echo "$n $report sent" >"$count"
     name=$(hc get "$pane" --json 2>/dev/null | jq -r '.name // empty') || name=''
     [ -n "$name" ] || name=$pane
-    hc send "$LANE_COORDINATOR" "[lane $name] stopped without reporting done or escalating (mode $LANE_MODE, terminal $pane). Check it: hc read $name --lines 120; nudge it with: $dir/lane.sh reply $name \"<what to do next>\"" >/dev/null 2>&1 || true
+    detach='nohup'
+    if command -v setsid >/dev/null; then detach=setsid; fi
+    "$detach" hc send "$LANE_COORDINATOR" -- "[lane $name] stopped without reporting done or escalating (mode $LANE_MODE, terminal $pane). Check it: hc read $name --lines 120; nudge it with: $dir/lane.sh reply $name \"<what to do next>\"" </dev/null >/dev/null 2>&1 &
   fi
   exit 0
 fi

@@ -66,7 +66,7 @@ if [ "$cmd" = reply ] && [ "$app" = 1 ]; then
   read -r term of mode < <(jq -r '"\(.address) \(.labels.lane_of // "-") \(.labels.lane_mode // "-")"' <<<"$info")
   [ "$of" != - ] || die "$lane is not a lane (no lane_of label)"
   app_state "$term" "$of" "$mode" working
-  if ! hc send "$term" "$3" >/dev/null; then
+  if ! hc send "$term" -- "$3" >/dev/null; then
     hc label "$term" "lane_state=$(jq -r '.labels.lane_state // ""' <<<"$info")" \
       "lane_report=$(jq -r '.labels.lane_report // ""' <<<"$info")" \
       "lane_note=$(jq -r '.labels.lane_note // ""' <<<"$info")" >/dev/null || true
@@ -108,17 +108,22 @@ if [ "$app" = 1 ]; then
   fi
   state="done"
   if [ "$cmd" = escalate ]; then state=escalated; fi
-  n=$(printf '%s' "$2" | tr '\r\n' '  ')
-  app_state "$HC_TERMINAL_ID" "$LANE_COORDINATOR" "$LANE_MODE" "$state" "lane_note=$n"
-  name=$(hc get "$HC_TERMINAL_ID" --json 2>/dev/null | jq -r '.name // empty' 2>/dev/null) || name=''
+  n=$(note "$2" | tr -d '[:cntrl:]')
+  info=$(hc get "$HC_TERMINAL_ID" --json 2>/dev/null) || info='{}'
+  name=$(jq -r '.name // empty' <<<"$info" 2>/dev/null) || name=''
   [ -n "$name" ] || name=$HC_TERMINAL_ID
+  app_state "$HC_TERMINAL_ID" "$LANE_COORDINATOR" "$LANE_MODE" "$state" "lane_note=$n"
   if [ "$cmd" = "done" ]; then
     msg="[lane $name] done: $n. Read its report: hc read $name --lines 120"
   else
     msg="[lane $name] escalation: $n. Read the full question: hc read $name --lines 80; answer with: $here/lane.sh reply $name \"<answer>\""
   fi
-  hc send "$LANE_COORDINATOR" "$msg" >/dev/null ||
-    die "lane_state=$state is recorded, but the coordinator $LANE_COORDINATOR was not told"
+  if ! hc send "$LANE_COORDINATOR" -- "$msg" >/dev/null; then
+    hc label "$HC_TERMINAL_ID" "lane_state=$(jq -r '.labels.lane_state // "working"' <<<"$info")" \
+      "lane_report=$(jq -r '.labels.lane_report // ""' <<<"$info")" \
+      "lane_note=$(jq -r '.labels.lane_note // ""' <<<"$info")" >/dev/null || true
+    die "the coordinator $LANE_COORDINATOR did not take the notice (blocked or gone?); lane_state is unchanged, run lane.sh $cmd again"
+  fi
   exit 0
 fi
 
