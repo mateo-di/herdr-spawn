@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Usage (in a lane):        lane.sh done "<one-line summary>" | escalate "<one-line summary>" | working
-#       (in the coordinator): lane.sh reply <lane-name|pane> "<answer>"
+#       (in the coordinator): lane.sh reply <lane-name|pane> "<answer>" | goal <lane-name|pane-or-terminal>
 # A lane declares its state in the lane_state pane token (working, done, escalated) instead of the watcher
 # guessing it, and only talks to herdr: it writes no files, so no harness sandbox can get in the way. done and
 # escalate also set lane_note (the summary on one line, capped at 76 characters plus "..." because herdr cuts a
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 die() { echo "lane.sh: $*" >&2; exit 1; }
-usage="usage: lane.sh done \"<one-line summary>\" | escalate \"<one-line summary>\" | working | reply <lane> \"<answer>\""
+usage="usage: lane.sh done \"<one-line summary>\" | escalate \"<one-line summary>\" | working | reply <lane> \"<answer>\" | goal <lane-name|pane-or-terminal>"
 [ $# -ge 1 ] || die "$usage"
 cmd=$1
 command -v jq >/dev/null || die "jq is required"
@@ -57,8 +57,43 @@ case $cmd in
     ;;
   working) [ $# -eq 1 ] || die "$usage" ;;
   reply) [ $# -eq 3 ] && [ -n "$3" ] || die "$usage" ;;
+  goal) [ $# -eq 2 ] && [ -n "$2" ] || die "$usage" ;;
   *) die "$usage" ;;
 esac
+
+if [ "$cmd" = goal ]; then
+  lane=$2
+  if [ "$app" = 1 ]; then
+    # Without the caller address, hc cannot acknowledge the coordinator's child news.
+    info=$(unset HC_TERMINAL_ID; hc get "$lane" --json) || die "no terminal $lane"
+    metadata=$(jq -c '.labels // {}' <<<"$info")
+  elif [[ "$lane" == *:* ]]; then
+    info=$(herdr pane get "$lane") || die "no pane $lane"
+    metadata=$(jq -c '.result.pane.tokens // {}' <<<"$info")
+  else
+    info=$(herdr agent get "$lane") || die "no agent $lane"
+    metadata=$(jq -c '.result.agent.tokens // {}' <<<"$info")
+  fi
+  ref=$(jq -r '.goal_id // empty' <<<"$metadata")
+  [ -n "$ref" ] || die "$lane has no goal manifest (older lane or not a lane)"
+  [[ "$ref" =~ ^g\.[[:alnum:]]{12}$ ]] || die "invalid goal manifest reference on $lane"
+  manifest=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn/goals/$ref/goal.json
+  [ -r "$manifest" ] || die "goal manifest $ref is not readable for $lane"
+  # Startup status only outranks the initial "working" state, not a lane's own report.
+  jq -e --argjson meta "$metadata" '
+    select(.goal_id == $meta.goal_id and .goal_mode == $meta.goal_mode and (.objective | type) == "string")
+    | .goal_startup = ($meta.goal_startup // "unknown")
+    | .goal_verification = (if .goal_mode == "managed" then "not_applicable"
+        elif .goal_mode == "native" and .agent == "codex" and .goal_startup == "ready" then "verified"
+        else "unverified" end)
+    | .goal_status = (if $meta.lane_state == "done" or $meta.lane_state == "escalated" then $meta.lane_state
+        elif (.goal_startup == "pending" or .goal_startup == "failed")
+          and ($meta.lane_report == ("start-" + .goal_id) or $meta.lane_report == null) then .goal_startup
+        elif $meta.lane_state == "working" then "active"
+        else "unknown" end)
+  ' "$manifest" || die "invalid goal manifest $ref for $lane"
+  exit 0
+fi
 
 if [ "$cmd" = reply ] && [ "$app" = 1 ]; then
   lane=$2

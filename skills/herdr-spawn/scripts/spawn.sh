@@ -32,21 +32,21 @@ die() { echo "spawn.sh: $*" >&2; exit 1; }
 
 conf=${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}
 
-# Prints "<agent> <template>" lines: the config's entries first (they win), then the built-in defaults.
+# Prints "<agent> <origin> <template>" lines: the config's entries first (they win).
 templates() {
   if [ -r "$conf" ]; then
     local a t
     while read -r a t || [ -n "$a" ]; do
       case $a in ''|'#'*) continue ;; esac
-      printf '%s %s\n' "$a" "$t"
+      printf '%s custom %s\n' "$a" "$t"
     done <"$conf"
   fi
-  printf '%s\n' 'claude claude -n {name} {prompt}' 'codex codex {prompt}' 'opencode opencode --prompt {prompt}' \
-    'omp omp {prompt}' \
-    'lane:claude claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
-    'lane:codex codex -c shell_environment_policy.inherit=all {slashgoal}' \
-    'lane:opencode export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
-    'lane:omp omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
+  printf '%s\n' 'claude builtin claude -n {name} {prompt}' 'codex builtin codex {prompt}' \
+    'opencode builtin opencode --prompt {prompt}' 'omp builtin omp {prompt}' \
+    'lane:claude builtin claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
+    'lane:codex builtin {builtin-codex-lane}' \
+    'lane:opencode builtin export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
+    'lane:omp builtin omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
 }
 
 pick() {
@@ -81,7 +81,7 @@ while [ $# -gt 0 ]; do
       shift 2 ;;
     --goal)
       [ $# -ge 5 ] || die "$usage"
-      [ -n "$2" ] || die "--goal needs a non-empty objective"
+      [[ "$2" == *[![:space:]]* ]] || die "--goal needs a non-empty objective"
       goal=$2
       shift 2 ;;
     *) break ;;
@@ -100,15 +100,16 @@ statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 scriptdir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
 if [ -n "$lane" ]; then
-  # The lane launches from a composed prompt file, written once the name is known to be free.
+  [[ $statedir = /* ]] || statedir=$PWD/$statedir
   callerprompt=$promptfile
-  promptfile=$statedir/lane-$name.md
   key=lane:$agent
 else
   key=$agent
 fi
 
-template=$(templates | awk -v a="$key" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
+entry=$(templates | awk -v a="$key" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
+origin=${entry%% *}
+template=${entry#* }
 if [ -z "$template" ]; then
   if [ -n "$lane" ]; then
     die "unknown lane agent '$agent'; known: $(templates | awk '/^lane:/ { sub(/^lane:/, "", $1); print $1 }' | sort -u | paste -sd' ' -); add lane:$agent to $conf"
@@ -130,26 +131,95 @@ expand() {
       "slashgoal}"*) out+=$(printf %q "/goal $goal (brief: $promptfile)"); rest=${rest#"slashgoal}"} ;;
       "adapters}"*) out+=$(printf %q "$adapters"); rest=${rest#"adapters}"} ;;
       "occonfig}"*)
-        mkdir -p "$statedir"
-        jq -n --arg p "file://$adapters/opencode/herdr-lanes" '{plugins: [$p]}' >"$statedir/lane-$name-opencode.json"
-        out+=$(printf %q "$statedir/lane-$name-opencode.json"); rest=${rest#"occonfig}"} ;;
+        local config=$statedir/lane-$name-opencode.json
+        if [ -n "$lane" ]; then config=$goal_dir/opencode.json; else mkdir -p "$statedir" || return 1; fi
+        jq -n --arg p "file://$adapters/opencode/herdr-lanes" '{plugins: [$p]}' >"$config" || return 1
+        out+=$(printf %q "$config"); rest=${rest#"occonfig}"} ;;
       *) out+="{" ;;
     esac
   done
   printf '%s' "$out$rest"
 }
-launch=$(expand "$template")
-
 command -v jq >/dev/null || die "jq is required"
 
-# The lane's prompt: protocol (with lane.sh's absolute path), the goal, then the caller's brief.
-compose_lane() {
-  mkdir -p "$statedir"
-  protocol=$(cat "$scriptdir/../lane-protocol.md")
-  {
-    printf '%s\n\n## Goal\n\n%s\n\n## Brief\n\n' "${protocol//LANE_SH/$scriptdir/lane.sh}" "$goal"
-    cat "$callerprompt"
-  } >"$promptfile"
+codex_start='' goal_id='' goal_target='' goal_surface=herdr
+
+create_goal_manifest() {
+  case "$origin:$agent" in
+    builtin:opencode) goal_mode=managed ;;
+    builtin:codex|builtin:claude|builtin:omp) goal_mode=native ;;
+    *) goal_mode=custom ;;
+  esac
+  goal_dir=$(
+    umask 077
+    mkdir -p "$statedir/goals" && mktemp -d "$statedir/goals/g.XXXXXXXXXXXX"
+  ) || die "could not allocate a private lane goal manifest"
+  goal_id=${goal_dir##*/}
+  (
+    umask 077
+    jq -n --arg goal_id "$goal_id" --arg objective "$goal" --arg goal_mode "$goal_mode" \
+      --arg agent "$agent" --arg lane_mode "$lane" '{ $goal_id, $objective, $goal_mode, $agent, $lane_mode }' >"$goal_dir/goal.json" &&
+      chmod 400 "$goal_dir/goal.json"
+  ) || die "could not write lane goal manifest $goal_id"
+}
+
+report_goal_startup() {
+  if [ "$goal_surface" = hc ]; then
+    hc label "$goal_target" "goal_startup=$1" >/dev/null
+  else
+    # lane.sh can replace the lifecycle source without losing the manifest reference.
+    herdr pane report-metadata "$goal_target" --source herdr-spawn-goal --token "goal_id=$goal_id" \
+      --token "goal_mode=$goal_mode" --token "goal_startup=$1" >/dev/null
+  fi
+}
+
+finish_spawn() {
+  if [ -n "$goal_target" ]; then
+    report_goal_startup failed || echo "spawn.sh: could not record goal startup failure on $goal_target" >&2
+  fi
+  if [ -n "$codex_start" ]; then
+    rm -f -- "$codex_start/result" "$codex_start/result.tmp"
+    rmdir -- "$codex_start"
+  fi
+}
+trap finish_spawn EXIT
+
+codex_ready() {
+  [ -n "$codex_start" ] || return 0
+  local phase detail
+  [ -s "$codex_start/result" ] || return 1
+  read -r phase detail <"$codex_start/result" || return 1
+  case $phase in
+    ready) return 0 ;;
+    error) die "Codex native goal startup failed in $1: $detail; left open, inspect with: $2" ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_launch() {
+  if [ -n "$lane" ]; then
+    create_goal_manifest
+    # The same private, unique directory holds the brief and any generated config.
+    promptfile=$goal_dir/brief.md
+    local protocol
+    protocol=$(cat "$scriptdir/../lane-protocol.md")
+    (
+      umask 077
+      {
+        printf '%s\n\n## Goal\n\n%s\n\n## Brief\n\n' "${protocol//LANE_SH/$scriptdir/lane.sh}" "$goal" &&
+          cat "$callerprompt"
+      } >"$promptfile" && chmod 400 "$promptfile"
+    ) || die "could not write the brief for $goal_id"
+  fi
+  if [ "$key" = lane:codex ] && [ "$origin" = builtin ]; then
+    local result
+    codex_start=$(mktemp -d "$statedir/.codex-start.XXXXXXXX") || die "could not create Codex startup directory"
+    launch=$(printf 'node %q %q %q %q' "$scriptdir/codex-lane.mjs" "$codex_start" "$promptfile" "$goal")
+    result=$(printf %q "$codex_start/result")
+    launch+=" || { if [ -d $(printf %q "$codex_start") ] && [ ! -s $result ]; then printf '%s\n' 'error Codex lane helper failed (Node.js 18+ is required in the child shell)' > $result; fi; }"
+  else
+    launch=$(expand "$template") || die "could not prepare the $key launch"
+  fi
 }
 
 # The Herdr app (herdr-core, `hc`) sets HC_TERMINAL_ID instead of HERDR_ENV. The child launches through hc run
@@ -168,10 +238,10 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     [ -n "$where" ] || die "no space or tab shows terminal $HC_TERMINAL_ID; inspect with: herdr-app ls"
     read -r space tab <<<"$where"
     shell=${SHELL:-/bin/sh}
+    prepare_launch
     line="$launch; exec $(printf %q "$shell")"
     if [ -n "$lane" ]; then
       line="export LANE_MODE=$(printf %q "$lane"); export LANE_COORDINATOR=$(printf %q "$HC_TERMINAL_ID"); $line"
-      compose_lane
     fi
     cwd=$tabdir
     [ -n "$cwd" ] || cwd=$PWD
@@ -179,26 +249,41 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     hc_argv+=(--label "herdr.space=$space")
     if [ -z "$tabdir" ]; then hc_argv+=(--label "herdr.tab=$tab"); fi
     if [ -n "$lane" ]; then
-      hc_argv+=(--label "lane_of=$HC_TERMINAL_ID" --label "lane_mode=$lane" --label "lane_state=working" --label "lane_report=$(date +%s)-$$-$RANDOM")
+      hc_argv+=(--label "lane_of=$HC_TERMINAL_ID" --label "lane_mode=$lane" --label "lane_state=working" --label "lane_report=start-$goal_id"
+        --label "goal_id=$goal_id" --label "goal_mode=$goal_mode" --label goal_startup=pending)
     fi
     hc_argv+=(--)
     hc_argv+=("$shell" -ic "$line")
     out=$(hc run "${hc_argv[@]}") || die "hc run failed: $out"
     term=$(jq -r '.address // empty' <<<"$out")
     [ -n "$term" ] || die "hc run returned no terminal: $out"
+    if [ -n "$lane" ]; then
+      goal_surface=hc goal_target=$term
+    fi
 
+    inspect="hc read $term --lines 40"
     status=
     for _ in $(seq 120); do
-      status=$(hc get "$term" --json | jq -r 'select(.status.app) | "\(.status.app) \(.status.state)"') || true
-      [ -n "$status" ] && break
+      if codex_ready "terminal $term" "$inspect"; then
+        status=$(hc get "$term" --json | jq -r --arg native "$codex_start" \
+          'select(.status.app and ($native == "" or (.status.app | ascii_downcase) == "codex")) | "\(.status.app) \(.status.state)"') || true
+        if [ -n "$status" ] && codex_ready "terminal $term" "$inspect"; then break; fi
+      fi
       sleep 0.5
     done
-    [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: hc read $term --lines 40"
+    codex_ready "terminal $term" "$inspect" ||
+      die "no Codex native goal startup confirmation in terminal $term after 60s, left open; inspect with: $inspect"
+    [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: $inspect"
+    if [ -n "$goal_target" ]; then
+      report_goal_startup ready || die "could not record goal startup on terminal $term, left open"
+      goal_target=
+    fi
     echo "$term $name $status"
     exit 0
   fi
   target=$4 dir=$5
   shell=${SHELL:-/bin/sh}
+  prepare_launch
   line="cd $(printf %q "$PWD") && $launch; exec $(printf %q "$shell")"
   split=$(herdr-app do pane.split --pane "$target" --direction "$dir" \
     --argv "$(jq -cn --arg sh "$shell" --arg line "$line" '[$sh, "-ic", $line]')") ||
@@ -220,9 +305,7 @@ fi
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (neither HERDR_ENV=1 nor HC_TERMINAL_ID)"
 [ -z "$lane" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "--lane needs HERDR_PANE_ID, the coordinator's pane"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
-if [ -n "$lane" ]; then
-  compose_lane
-fi
+prepare_launch
 
 if [ -n "$tabdir" ]; then
   tabcmd=(herdr tab create)
@@ -243,24 +326,38 @@ else
   { [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
 fi
 if [ -n "$lane" ]; then
+  goal_target=$pane
+  report_goal_startup pending || die "recording goal metadata on pane $pane failed, pane left open"
   # Registered before the agent starts, so a lane that reports at once is never overwritten by a late report.
   herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$HERDR_PANE_ID" --token "lane_mode=$lane" \
-    --token lane_state=working --token "lane_report=$(date +%s)-$$-$RANDOM" >/dev/null ||
+    --token lane_state=working --token "lane_report=start-$goal_id" >/dev/null ||
     die "recording the lane tokens on pane $pane failed, pane left open"
   launch="export LANE_MODE=$(printf %q "$lane"); export LANE_COORDINATOR=$(printf %q "$HERDR_PANE_ID"); $launch"
 fi
 herdr pane run "$pane" "$launch" >/dev/null || die "launch failed; pane $pane left open"
 
+inspect="herdr pane read $pane --source recent --lines 40"
 info=
 for _ in $(seq 120); do
-  if info=$(herdr agent get "$pane" 2>/dev/null); then break; fi
+  if codex_ready "pane $pane" "$inspect" && info=$(herdr agent get "$pane" 2>/dev/null); then
+    if [ -z "$codex_start" ] || {
+      jq -e '.result.agent.agent == "codex"' <<<"$info" >/dev/null && codex_ready "pane $pane" "$inspect"
+    }; then break; fi
+  fi
   info=
   sleep 0.5
 done
-[ -n "$info" ] || die "no agent detected in pane $pane after 60s, pane left open; inspect with: herdr pane read $pane --source recent --lines 40"
+codex_ready "pane $pane" "$inspect" ||
+  die "no Codex native goal startup confirmation in pane $pane after 60s, pane left open; inspect with: $inspect"
+[ -n "$info" ] || die "no agent detected in pane $pane after 60s, pane left open; inspect with: $inspect"
 
 herdr agent rename "$pane" "$name" >/dev/null ||
   die "agent running in $pane but rename to $name failed (name taken?)"
+if [ -n "$goal_target" ]; then
+  report_goal_startup ready || die "could not record goal startup on pane $pane, left open"
+  goal_target=
+fi
+
 if [ -n "$lane" ]; then
   watchlog=$statedir/watch-${HERDR_PANE_ID//[!A-Za-z0-9_-]/_}.log
   watch=$scriptdir/lanes-watch.sh
