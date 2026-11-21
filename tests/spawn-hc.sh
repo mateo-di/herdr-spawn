@@ -17,6 +17,10 @@ case "$1:$2" in
     ;;
   get:t-child) printf '%s\n' '{"status":{"app":"test-agent","state":"idle"}}' ;;
   get:*) exit 3 ;;
+  label:t-child)
+    [[ $# -eq 3 && $3 == goal_startup=ready ]]
+    printf '%s\n' "$3" >"$TEST_LABEL"
+    ;;
   run:*)
     printf '%s\n' "$@" >"$TEST_ARGS"
     printf '%s\n' '{"address":"t-child"}'
@@ -33,6 +37,7 @@ chmod +x "$tmp/bin/hc" "$tmp/bin/herdr-app"
 
 export PATH="$tmp/bin:$PATH" HERDR_ENV=0 HC_TERMINAL_ID=t-parent
 export TEST_SPACE=sp-parent TEST_TAB=tb-parent TEST_ARGS="$tmp/args"
+export TEST_LABEL="$tmp/label"
 export HERDR_SPAWN_CONFIG="$tmp/no-config" XDG_STATE_HOME="$tmp/state"
 
 spawn() {
@@ -42,6 +47,7 @@ spawn() {
 
 assert_spawn() {
   local out
+  : >"$TEST_LABEL"
   out=$(spawn "$@")
   [[ $out == 't-child test-lane test-agent idle' ]]
   grep -Fxq 'herdr.space=sp-parent' "$TEST_ARGS"
@@ -49,6 +55,9 @@ assert_spawn() {
   grep -Fxq 'lane_of=t-parent' "$TEST_ARGS"
   grep -Fxq 'lane_mode=unit' "$TEST_ARGS"
   grep -Fxq 'lane_state=working' "$TEST_ARGS"
+  grep -Fxq 'goal_startup=pending' "$TEST_ARGS"
+  grep -Fxq 'goal_mode=native' "$TEST_ARGS"
+  grep -Fxq 'goal_startup=ready' "$TEST_LABEL"
 }
 
 assert_spawn

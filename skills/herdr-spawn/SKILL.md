@@ -19,6 +19,8 @@ claude  my-claude-wrapper -n {name} {prompt}
 
 Unknown agent: ask the user for its executable and how it takes a name and an initial prompt; with their OK, add a line to the config.
 
+The built-in Codex lane verifies native goal startup before reporting success. A `lane:codex` override replaces that check and is responsible for activating the goal; a positional `/goal …` is ordinary Codex prompt text. OpenCode uses a managed goal through the composed brief and lane protocol, not a native goal.
+
 ## Handing over work in progress
 
 If the child continues work this session started (a run, a plan, an investigation, a branch), write a handoff doc before spawning: the child has none of your context, and the user can read and correct the doc.
@@ -56,6 +58,10 @@ In the Herdr app a lane is an `hc` terminal, your child, shown as a tab in your 
 ### Coordinating lanes
 
 Spawning lanes makes you their coordinator. Your goal is every lane you spawned at `done`, its result verified and integrated; the lanes do the work and you keep them unblocked.
+
+Spawning a lane never sets or replaces the coordinator's native goal. In Codex, use `create_goal` for your own thread only when the user explicitly requests it; the user can also use `/goal` in that session.
+
+Run `scripts/lane.sh goal <name-or-id>` to read a lane's exact objective, goal mode, and goal status as JSON. An escalated lane waits for your reply; `done` records the lane's completion report, not your verification of its evidence.
 
 - Brief each lane with one goal: a done criterion it can verify (a command that passes, a draft PR opened), the scope it must stay in, and the decisions the user already made.
 - Between notices, stay idle rather than polling; the watcher wakes you (in the Herdr app, the lanes' notices and hc's notes do). A `done` notice means read, verify and integrate; `stopped` or `stalled` means read the lane and nudge it with `lane.sh reply`.

@@ -11,6 +11,7 @@ An Opus coordinator in the Herdr app runs two tickets as driver lanes, each in i
 - Herdr 0.9.1 or newer, with the caller running inside a Herdr pane; or the Herdr app, with `hc` (herdr-core) on the caller's `PATH`. To split an explicit pane by ID in the app (without `--lane`), run the command on the window's host with `herdr-app` on `PATH`.
 - `jq`
 - A bash- or zsh-compatible shell in the pane (the launch line uses `$(cat …)`)
+- For built-in Codex lanes only: Codex CLI 0.171.0 (native goal startup verified on this version) and Node.js 18+ on the child shell's `PATH`
 - Recommended: the built-in Herdr skill, which covers prompting, waiting, reading and dialogs: `npx skills add herdrdev/herdr --skill herdr -g`
 
 ## Install
@@ -52,7 +53,26 @@ A child that changes a repo gets its own worktree and its own tab: `spawn.sh --t
 
 In the Herdr app the lane is an `hc` terminal, a child of the coordinator, shown as a tab in its space or in the coordinator's tab without `--tab`. `spawn.sh` reads the coordinator's `herdr.space` label from `hc` and either reuses `herdr.tab` or assigns a new tab ID with `--tab`. It launches on the coordinator's host, even when the window is on another machine. `lane.sh done|escalate` sends the notice straight to the coordinator with `hc send` (tagged `<hc from="tN name">`); `hc` itself notes blocked and exited lanes, a lane that stops without reporting gets a stopped notice from the stop hook, and the stalled notice is TUI-only. In the app, `hc ls` and `hc get <lane>` show lanes and their `lane_*` labels.
 
-`--goal` is required with `--lane` and refused without it, so a lane always has a goal. `spawn.sh` composes the lane's prompt into `herdr-spawn`'s state dir as `lane-<name>.md`: the lane protocol, the goal, then your prompt file.
+`--goal` requires a non-blank objective and is only accepted with `--lane`. `spawn.sh` writes the lane protocol, goal, and your prompt file to `brief.md` in that launch's private `herdr-spawn/goals/<goal_id>/` state directory. Any generated OpenCode config lives there too, so reusing a lane name cannot overwrite either file.
+
+The built-in Codex lane starts a new saved thread from the child shell, sets and reads back an active native goal through the Codex app-server, then resumes **that thread** in the pane. The objective is your `--goal` with an instruction to read the absolute path of the composed brief. Codex starts a native goal turn on resume; no positional `/goal` prompt is sent. If goals are disabled in Codex, the goal cannot be verified, or the TUI does not begin pursuing it, startup reports an error and leaves the pane open for inspection. This does not change the coordinator's goal. To set a goal in its own thread, a Codex coordinator can use `create_goal` when explicitly directed by the user, or the user can enter `/goal` in that TUI.
+
+Inspect a lane's original objective and current status with `scripts/lane.sh goal <lane-name|pane-or-terminal>`. It prints JSON and does not send messages or change the lane. Spawn saves the exact `--goal` text in a private, write-once manifest under `herdr-spawn/goals/` in the state directory. Each launch gets a new `goal_id`, even if a lane name is reused; pane tokens and hc labels contain no objective text. Older lanes without a manifest still support the original commands, but `goal` reports that no manifest is available.
+
+```json
+{
+  "goal_id": "g.AbCdEf012345",
+  "objective": "Run the migration tests.\nDone when the results are recorded.",
+  "goal_mode": "managed",
+  "agent": "opencode",
+  "lane_mode": "unit",
+  "goal_startup": "ready",
+  "goal_verification": "not_applicable",
+  "goal_status": "active"
+}
+```
+
+Built-in OpenCode is `managed`; built-in Codex, Claude, and oh-my-pi are `native`; any overridden template is `custom`. `goal_status` follows lane state (`active`, `escalated`, `done`) and can also show `pending` or `failed` during startup, before the lane explicitly reports. Only built-in Codex currently verifies native goal startup. For Claude, oh-my-pi, and custom templates, `goal_verification` is `unverified`: `active` describes the lane lifecycle, not proof that the harness accepted a native goal.
 
 A lane declares its state with `scripts/lane.sh`, which sets a `lane_state` pane token (`--lane` starts it at `working`):
 
@@ -93,12 +113,12 @@ A Claude Code caller with a `claude` child talks to it through SendMessage in bo
 | `opencode` | `opencode --prompt {prompt}` |
 | `omp` | `omp {prompt}` |
 
-With `--lane`, the `lane:<agent>` template is used instead; each holds the harness to the lane's goal natively (Codex needs `inherit=all` so its shell keeps the `HERDR_*` and `LANE_*` variables `lane.sh` reads):
+With `--lane`, the `lane:<agent>` template is used instead:
 
 | Lane agent | Template |
 |---|---|
 | `lane:claude` | `claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}` |
-| `lane:codex` | `codex -c shell_environment_policy.inherit=all {slashgoal}` |
+| `lane:codex` | Built-in native goal adapter; resumes the saved thread with `--no-daemon` and `shell_environment_policy.inherit=all` so commands run with the child's `HERDR_*` or `HC_*` variables and `LANE_*` variables |
 | `lane:opencode` | `export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}` |
 | `lane:omp` | `omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts` |
 
@@ -113,7 +133,11 @@ codex   my-codex-alias {prompt}
 gemini  gemini -i {prompt}
 ```
 
-The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead). In the Herdr app the new pane runs it with `$SHELL -ic`, for the same reason.
+The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead). In the Herdr app the new pane runs it with `$SHELL -ic`, for the same reason. The built-in Codex lane adapter uses the `codex` executable on that shell's `PATH` for both steps. To use a shell alias, function, or custom launch flow instead, set a `lane:codex` entry; that fully replaces the adapter and is responsible for native goal setup. Codex treats a positional `/goal …` argument as ordinary text.
+
+## Testing lanes
+
+Run `node --test tests/*.test.mjs` for the startup and goal lifecycle checks. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real TUI against a loopback model endpoint and verify that disabling goals prevents startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
 
 ## License
 
