@@ -97,7 +97,9 @@ agent=$1 name=$2 promptfile=$3
 promptfile=$(CDPATH='' cd -- "$(dirname -- "$promptfile")" && pwd)/${promptfile##*/}
 
 statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
-scriptdir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+# -P: the skill directory is often a symlink to the repo (the README's install), and the walk up to adapters must
+# leave from the repo, not from the link's parent.
+scriptdir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
 if [ -n "$lane" ]; then
   [[ $statedir = /* ]] || statedir=$PWD/$statedir
