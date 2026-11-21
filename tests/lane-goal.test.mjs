@@ -35,11 +35,15 @@ const pane = row => ({ pane_id: row.id, tokens: Object.assign({}, ...Object.valu
 const no = () => process.exit(1);
 switch (basename(process.argv[1])) {
   case 'herdr-app':
-    out({ spaces: [{ id: 's1', tabs: [{ id: 'tab1', terminals: [{ terminal: 'parent' }] }] }] });
-    break;
+    assert.fail('unexpected call to herdr-app');
   case 'hc':
     switch (a) {
       case 'get': {
+        if (b === 'parent') {
+          assert.equal(c, '--json');
+          out({ labels: { 'herdr.space': 's1', 'herdr.tab': 'tab1' } });
+          break;
+        }
         if (process.env.CHECK_READ_ONLY === '1') {
           assert.equal(process.env.HC_TERMINAL_ID, undefined);
           assert.equal(process.env.HC_SOCKET, 'mock-socket');

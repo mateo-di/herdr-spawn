@@ -229,14 +229,20 @@ prepare_launch() {
 # user's shell (wrappers, aliases and functions apply), replaced by a plain shell once the agent exits. An hc run
 # child doesn't take the person's focus; a split does.
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
-  command -v herdr-app >/dev/null || die "herdr-app is required"
   command -v hc >/dev/null || die "hc (herdr-core) is required"
   if [ $# -eq 3 ] || [ -n "$lane" ]; then
     if hc get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
-    where=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" \
-      '.spaces[] | .id as $sid | .tabs[]? | select((.terminals // []) | map(.terminal) | index($t) != null) | "\($sid) \(.id)"')
-    [ -n "$where" ] || die "no space or tab shows terminal $HC_TERMINAL_ID; inspect with: herdr-app ls"
-    read -r space tab <<<"$where"
+    # The placement labels live on the caller's core, even when the window runs on another host.
+    coordinator=$(hc get "$HC_TERMINAL_ID" --json) || die "could not read coordinator terminal $HC_TERMINAL_ID"
+    space=$(jq -er '.labels["herdr.space"] | strings | select(length > 0)' <<<"$coordinator") ||
+      die "coordinator terminal $HC_TERMINAL_ID has no herdr.space label; open it in Herdr first"
+    if [ -n "$tabdir" ]; then
+      # The app creates unknown tab IDs from labels but does not label tabs it assigns itself.
+      tab="tbspawn-$(date +%s)-$$-$RANDOM"
+    else
+      tab=$(jq -er '.labels["herdr.tab"] | strings | select(length > 0)' <<<"$coordinator") ||
+        die "coordinator terminal $HC_TERMINAL_ID has no herdr.tab label; use --tab or start from a tab created in Herdr App"
+    fi
     shell=${SHELL:-/bin/sh}
     prepare_launch
     line="$launch; exec $(printf %q "$shell")"
@@ -246,8 +252,7 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     cwd=$tabdir
     [ -n "$cwd" ] || cwd=$PWD
     hc_argv=(--bg --json --name "$name" --cwd "$cwd" --parent "$HC_TERMINAL_ID" --outlive-parent)
-    hc_argv+=(--label "herdr.space=$space")
-    if [ -z "$tabdir" ]; then hc_argv+=(--label "herdr.tab=$tab"); fi
+    hc_argv+=(--label "herdr.space=$space" --label "herdr.tab=$tab")
     if [ -n "$lane" ]; then
       hc_argv+=(--label "lane_of=$HC_TERMINAL_ID" --label "lane_mode=$lane" --label "lane_state=working" --label "lane_report=start-$goal_id"
         --label "goal_id=$goal_id" --label "goal_mode=$goal_mode" --label goal_startup=pending)
@@ -281,11 +286,12 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     echo "$term $name $status"
     exit 0
   fi
+  command -v herdr-app >/dev/null || die "run an explicit pane split on the window's host with herdr-app on PATH"
   target=$4 dir=$5
   shell=${SHELL:-/bin/sh}
   prepare_launch
   line="cd $(printf %q "$PWD") && $launch; exec $(printf %q "$shell")"
-  split=$(herdr-app do pane.split --pane "$target" --direction "$dir" \
+  split=$(herdr-app 'do' pane.split --pane "$target" --direction "$dir" \
     --argv "$(jq -cn --arg sh "$shell" --arg line "$line" '[$sh, "-ic", $line]')") ||
     die "split of $target failed: $split"
   term=$(jq -r '.terminal // empty' <<<"$split")
