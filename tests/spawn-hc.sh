@@ -80,3 +80,12 @@ TEST_SPACE='' assert_rejected herdr.space
 TEST_SPACE='' assert_rejected herdr.space --tab "$tmp/work tree"
 TEST_TAB='' assert_rejected herdr.tab
 printf '%s\n' 'PASS: missing placement fails before starting any terminal'
+
+mkdir -p "$tmp/agent/skills"
+ln -s "$(cd -P -- "$repo/skills/herdr-spawn" && pwd)" "$tmp/agent/skills/herdr-spawn"
+out=$(bash "$tmp/agent/skills/herdr-spawn/scripts/spawn.sh" \
+  --lane unit --goal 'Check adapters' opencode oc-lane "$tmp/prompt")
+[[ $out == 't-child oc-lane test-agent idle' ]]
+plugin=$(jq -r '.plugins[0]' "$XDG_STATE_HOME/herdr-spawn/lane-oc-lane-opencode.json")
+[[ $plugin == "file://$(cd -P -- "$repo" && pwd)/adapters/opencode/herdr-lanes" ]]
+printf '%s\n' 'PASS: a symlinked skill directory still finds the repo adapters'
