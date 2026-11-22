@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,13 +21,15 @@ const file = process.env.GOAL_MOCK;
 const db = JSON.parse(fs.readFileSync(file, 'utf8'));
 const save = () => fs.writeFileSync(file, JSON.stringify(db));
 const out = x => console.log(JSON.stringify(x));
-const flag = k => args[args.indexOf(k) + 1];
+const flag = k => args.includes(k) ? args[args.indexOf(k) + 1] : undefined;
 const values = k => args.flatMap((x, i) => x === k ? [args[i + 1]] : []);
 const kv = x => [x.slice(0, x.indexOf('=')), x.slice(x.indexOf('=') + 1)];
 const find = key => Object.values(db).find(row => row.id === key || row.name === key);
-const create = label => {
-  const id = (basename(process.argv[1]) === 'hc' ? 't' : 'tab1:p') + (Object.keys(db).length + 1);
-  db[id] = { id, label, sources: {}, labels: {} };
+const create = (label, parent) => {
+  const seq = Object.keys(db).length + 1;
+  const tab = parent?.tab ?? 'tab' + seq;
+  const id = (basename(process.argv[1]) === 'hc' ? 't' : tab + ':p') + seq;
+  db[id] = { id, label, tab, cwd: flag('--cwd'), sources: {}, labels: {} };
   return db[id];
 };
 const pane = row => ({ pane_id: row.id, tokens: Object.assign({}, ...Object.values(row.sources)),
@@ -56,8 +58,10 @@ switch (basename(process.argv[1])) {
       case 'run': {
         const row = create(flag('--name'));
         row.name = row.label;
+        row.parent = flag('--parent');
+        row.line = args.at(-1);
         row.labels = Object.fromEntries(values('--label').map(kv));
-        assert.equal(row.labels.goal_startup, 'pending');
+        if (row.labels.lane_mode) assert.equal(row.labels.goal_startup, 'pending');
         save();
         out({ address: row.id });
         break;
@@ -94,14 +98,25 @@ switch (basename(process.argv[1])) {
         out({ result: { root_pane: { pane_id: row.id } } });
         break;
       }
+      case 'pane split': {
+        const parent = find(c);
+        assert.ok(parent, 'split must target the resolved root pane');
+        const row = create(undefined, parent);
+        row.split = parent.id;
+        save();
+        out({ result: { pane: { pane_id: row.id } } });
+        break;
+      }
       case 'pane report-metadata':
         // Replace this source, forcing immutable goal tokens to live separately.
         (find(c) ?? no()).sources[flag('--source')] = Object.fromEntries(values('--token').map(kv));
         save();
         break;
       case 'pane run':
-        assert.equal(db[c].sources['herdr-spawn-goal'].goal_startup, 'pending');
+        if (db[c].sources['herdr-spawn-goal']) assert.equal(db[c].sources['herdr-spawn-goal'].goal_startup, 'pending');
         if (process.env.GOAL_FAIL === '1') no();
+        db[c].line = args[3];
+        save();
         break;
       case 'agent rename':
         if (process.env.GOAL_FAIL === 'rename') no();
@@ -127,7 +142,14 @@ for (const surface of ['herdr', 'hc']) {
     await mkdir(state);
     await writeFile(db, '{}');
     await writeFile(brief, 'Test brief');
-    await writeFile(conf, 'lane:omp omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts\n');
+    await writeFile(conf, [
+      'lane:legacy legacy --goal {goal}',
+      'lane:custom custom {modelarg} --model-id {model} --goal {goal}',
+      'model:custom:frontier vendor/custom:v2',
+      'model:claude:small compact-claude',
+      'model:claude:frontier -invalid',
+      '',
+    ].join('\n'));
     await writeFile(join(root, 'cli'), cli, { mode: 0o700 });
     for (const name of ['herdr-app', 'herdr', 'hc']) await symlink('cli', join(root, name));
     await writeFile(join(root, 'setsid'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
@@ -135,7 +157,7 @@ for (const surface of ['herdr', 'hc']) {
       ...process.env, PATH: `${root}:${process.env.PATH}`, GOAL_MOCK: db, GOAL_FAIL: '0',
       HERDR_ENV: surface === 'herdr' ? '1' : '', HERDR_PANE_ID: 'parent', HC_TERMINAL_ID: 'parent',
       HC_SOCKET: 'mock-socket', HC_SESSION: 'mock-session',
-      HERDR_SPAWN_CONFIG: conf, XDG_STATE_HOME: state,
+      HERDR_SPAWN_CONFIG: conf, XDG_STATE_HOME: state, SHELL: '/bin/bash', OPENCODE_CONFIG_CONTENT: '',
     };
     const invoke = (script, args, extra = {}) =>
       run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
@@ -162,6 +184,10 @@ for (const surface of ['herdr', 'hc']) {
     assert.equal(original.goal_verification, 'not_applicable');
     assert.equal(original.goal_status, 'active');
     assert.equal(original.lane_mode, 'unit');
+    assert.equal(original.parent_lane, null);
+    assert.equal(original.workdir, root);
+    assert.equal(original.task_class, 'simple');
+    assert.equal(original.model, 'openai/gpt-6.1-terra');
     const manifest = join(state, 'herdr-spawn', 'goals', original.goal_id, 'goal.json');
     const composed = join(state, 'herdr-spawn', 'goals', original.goal_id, 'brief.md');
     assert.equal((await stat(manifest)).mode & 0o777, 0o400);
@@ -188,8 +214,12 @@ for (const surface of ['herdr', 'hc']) {
     const native = await goal('native');
     assert.equal(native.goal_mode, 'native');
     assert.equal(native.goal_verification, 'unverified');
-    await spawnLane('omp', 'custom');
-    assert.equal((await goal('custom')).goal_mode, 'custom');
+    const { stderr: warning } = await spawnLane('legacy', 'legacy');
+    const legacy = await goal('legacy');
+    assert.equal(legacy.goal_mode, 'custom');
+    assert.equal(legacy.model, null);
+    assert.match(warning, /custom template kept its own model.*\{modelarg\}/);
+    assert.doesNotMatch(Object.values(await rows()).find(row => row.name === 'legacy').line, /--model/);
 
     const current = await rows();
     delete current[id].name; // Simulate freeing the name while the old pane is still inspectable.
@@ -203,10 +233,141 @@ for (const surface of ['herdr', 'hc']) {
     const reusedDir = join(state, 'herdr-spawn', 'goals', reused.goal_id);
     assert.match(await readFile(join(reusedDir, 'brief.md'), 'utf8'), /a different objective/);
     assert.match(await readFile(join(reusedDir, 'opencode.json'), 'utf8'), /herdr-lanes/);
+    assert.equal(JSON.parse(await readFile(join(reusedDir, 'opencode.json'), 'utf8')).model, 'openai/gpt-6.1-terra');
+
+    const workdir = join(root, 'different worktree');
+    const worklink = join(root, 'worktree-link');
+    await mkdir(workdir);
+    await symlink(workdir, worklink);
+    const start = (opts, agent, name, extra) => invoke('spawn.sh', [...opts, agent, name, brief], extra);
+    const rootOpts = ['--tab', worklink, '--lane', 'driver', '--goal', 'Root objective'];
+    const subOpts = ['--subtask-of', 'root', '--goal', 'Subtask objective'];
+    const idOf = stdout => stdout.trim().split(' ')[0];
+    const rootId = idOf((await start(rootOpts, 'claude', 'root')).stdout);
+    assert.equal((await goal(rootId)).workdir, workdir);
+    assert.equal((await goal(rootId)).model, 'opus');
+    assert.equal((await goal(rootId)).task_class, 'complex');
+    assert.match((await rows())[rootId].line, /--model opus/);
+    if (surface === 'hc') {
+      const moved = await rows();
+      moved[rootId].labels['herdr.space'] = 's-root';
+      moved[rootId].labels['herdr.tab'] = 'tab-root';
+      await writeFile(db, JSON.stringify(moved));
+    }
+    const first = idOf((await start([...subOpts, '--task', 'mechanical'], 'claude', 'sub-first')).stdout);
+    const second = idOf((await start(['--subtask-of', rootId, '--goal', 'Another subtask',
+      '--task', 'fact-check'], 'custom', 'sub-second')).stdout);
+    const third = idOf((await start([...subOpts, '--task', 'exceptional', '--model', 'vendor/chosen@v1'],
+      'claude', 'sub-third')).stdout);
+    const fourth = idOf((await start([...subOpts, '--task', 'exceptional'], 'omp', 'sub-fourth')).stdout);
+    assert.equal(new Set([rootId, first, second, third, fourth]).size, 5);
+    const placements = await rows();
+    for (const [target, taskClass, model] of [
+      [first, 'mechanical', 'compact-claude'],
+      [second, 'fact-check', 'vendor/custom:v2'],
+      [third, 'exceptional', 'vendor/chosen@v1'],
+      [fourth, 'exceptional', 'openai-codex/gpt-6.2-astra'],
+    ]) {
+      const row = placements[target];
+      const manifest = await goal(target);
+      assert.equal(manifest.workdir, workdir);
+      assert.equal(manifest.parent_lane, rootId);
+      assert.equal(manifest.lane_mode, 'unit');
+      assert.equal(manifest.task_class, taskClass);
+      assert.equal(manifest.model, model);
+      assert.equal(row.cwd, workdir);
+      assert.match(row.line, /LANE_COORDINATOR=parent/);
+      assert.ok(row.line.includes(`--model ${model}`), row.line);
+      if (surface === 'hc') {
+        assert.equal(row.parent, 'parent');
+        assert.equal(row.labels.lane_of, 'parent');
+        assert.equal(row.labels['herdr.tab'], placements[rootId].labels['herdr.tab']);
+        assert.equal(row.labels['herdr.space'], placements[rootId].labels['herdr.space']);
+      } else {
+        assert.equal(row.sources['herdr-spawn'].lane_of, 'parent');
+        assert.equal(row.tab, placements[rootId].tab);
+        assert.equal(row.split, rootId);
+      }
+    }
+    assert.match(placements[second].line, /--model-id vendor\/custom:v2/);
+
+    const beforeInvalid = await readFile(db, 'utf8');
+    for (const [opts, agent, message, extra] of [
+      [['--lane', 'unit', '--goal', 'Missing tab'], 'claude', /--lane needs --tab/],
+      [['--subtask-of', rootId], 'claude', /needs --goal/],
+      [[...subOpts, '--tab', workdir], 'claude', /does not combine/],
+      [[...subOpts, '--lane', 'unit'], 'claude', /does not combine/],
+      [['--subtask-of', first, '--goal', 'Nested'], 'claude', /not a registered root lane/],
+      [['--subtask-of', 'missing', '--goal', 'Missing'], 'claude', /no root lane/],
+      [subOpts, 'claude', /not a ready lane of the caller/, { HERDR_PANE_ID: first, HC_TERMINAL_ID: first }],
+      [[...subOpts, '--task', 'hardness'], 'claude', /--task must be/],
+      [[...subOpts, '--task', 'exceptional'], 'claude', /invalid model ID/],
+      [[...subOpts, '--model', 'openai/model --auto'], 'opencode', /safe model ID/],
+      [[...subOpts, '--task', 'simple'], 'legacy', /template cannot route a model/],
+      [[...subOpts, '--model', 'direct'], 'legacy', /template cannot route a model/],
+      [[...subOpts, '--task', 'simple'], 'custom', /no model mapping/],
+      [subOpts, 'opencode', /one valid JSON object/, { OPENCODE_CONFIG_CONTENT: '{} {}' }],
+    ]) {
+      await assert.rejects(start(opts, agent, 'rejected', extra), message);
+    }
+    await assert.rejects(invoke('spawn.sh', [...subOpts, 'claude', 'rejected', brief, rootId, 'right']), /does not combine/);
+    const manifestPath = join(state, 'herdr-spawn', 'goals', (await goal(rootId)).goal_id, 'goal.json');
+    await chmod(manifestPath, 0o644);
+    await assert.rejects(start(subOpts, 'claude', 'rejected'), /no private goal manifest/);
+    const rootManifest = await readFile(manifestPath, 'utf8');
+    await writeFile(manifestPath, JSON.stringify({ ...JSON.parse(rootManifest), goal_id: 'g.Wrong0000000' }));
+    await chmod(manifestPath, 0o400);
+    await assert.rejects(start(subOpts, 'claude', 'rejected'), /matching goal manifest/);
+    await chmod(manifestPath, 0o600);
+    await writeFile(manifestPath, rootManifest);
+    await chmod(manifestPath, 0o400);
+    assert.equal(await readFile(db, 'utf8'), beforeInvalid, 'an invalid launch must not create a pane');
+
+    const defaultOpts = [...subOpts, '--task', 'simple', '--model', 'default'];
+    const noModel = idOf((await start(defaultOpts, 'legacy', 'sub-default')).stdout);
+    assert.equal((await goal(noModel)).model, null);
+    assert.doesNotMatch((await rows())[noModel].line, /--model/);
+
+    const childEnv = {
+      ...env, SHELL: '/bin/true', CAPTURE: join(root, 'oc-env'),
+      OPENCODE_CONFIG_CONTENT: JSON.stringify({
+        model: 'ignore/this', permissions: { shell: 'deny' }, plugins: [['existing', { fixture: true }]],
+        fixture: 'private $HOME $(false) "value"',
+      }),
+    };
+    await writeFile(join(root, 'opencode'), '#!/bin/sh\nprintf "%s\\n" "$OPENCODE_CONFIG_CONTENT" >"$CAPTURE"\n', { mode: 0o700 });
+    const oc = idOf((await start([...subOpts, '--task', 'fact-check'], 'opencode', 'sub-oc', childEnv)).stdout);
+    const ocLine = (await rows())[oc].line;
+    assert.doesNotMatch(ocLine, /private \$HOME/);
+    assert.doesNotMatch(ocLine, /--model /);
+    await run('bash', ['-c', ocLine], { cwd: workdir, env: childEnv, timeout: 2000 });
+    const captured = JSON.parse(await readFile(childEnv.CAPTURE, 'utf8'));
+    const inherited = JSON.parse(childEnv.OPENCODE_CONFIG_CONTENT);
+    assert.equal(captured.model, 'openai/gpt-6.2-astra');
+    assert.deepEqual(captured.permissions, inherited.permissions);
+    assert.equal(captured.fixture, inherited.fixture);
+    assert.deepEqual(captured.plugins.slice(0, -1), inherited.plugins);
+    assert.match(captured.plugins.at(-1), /\/adapters\/opencode\/herdr-lanes$/);
+    const ocManifest = await goal(oc);
+    assert.equal(ocManifest.model, captured.model);
+    const ocConfig = JSON.parse(await readFile(join(state, 'herdr-spawn', 'goals', ocManifest.goal_id, 'opencode.json'), 'utf8'));
+    assert.deepEqual(ocConfig, { model: captured.model, plugins: [captured.plugins.at(-1)] });
+    await rm(childEnv.CAPTURE);
+    const invalidChild = run('bash', ['-c', ocLine], {
+      cwd: workdir, env: { ...childEnv, OPENCODE_CONFIG_CONTENT: '[' }, timeout: 2000,
+    });
+    if (surface === 'hc') assert.match((await invalidChild).stderr, /invalid child OPENCODE_CONFIG_CONTENT/);
+    else await assert.rejects(invalidChild, /invalid child OPENCODE_CONFIG_CONTENT/);
+    await assert.rejects(readFile(childEnv.CAPTURE), { code: 'ENOENT' });
+    const { stderr: trace } = await run('bash', ['-xc', ocLine], { cwd: workdir, env: childEnv, timeout: 2000 });
+    assert.doesNotMatch(trace, /private \$HOME/);
 
     await assert.rejects(spawnLane('claude', 'failed', objective, { GOAL_FAIL: '1' }), /left open/);
     const failed = Object.values(await rows()).find(row => row.label === 'failed').id;
     assert.equal((await goal(failed)).goal_status, 'failed');
+    const beforeFailedParent = await rows();
+    await assert.rejects(start(['--subtask-of', failed, '--goal', 'Invalid parent'], 'claude', 'rejected'), /not a ready lane/);
+    assert.deepEqual(await rows(), beforeFailedParent);
     if (surface === 'herdr') {
       await assert.rejects(spawnLane('claude', 'rename-failed', objective, { GOAL_FAIL: 'rename' }), /rename to rename-failed failed/);
       const renameFailed = Object.values(await rows()).find(row => row.label === 'rename-failed').id;
@@ -218,6 +379,7 @@ for (const surface of ['herdr', 'hc']) {
     else delete old[id].sources['herdr-spawn-goal'];
     await writeFile(db, JSON.stringify(old));
     await assert.rejects(lane(['goal', id]), /has no goal manifest/);
+    await assert.rejects(start(['--subtask-of', id, '--goal', 'Invalid parent'], 'claude', 'rejected'), /not a ready lane|goal manifest/);
     await lane(['working'], inside);
   });
 }

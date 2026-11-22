@@ -1,7 +1,7 @@
 {
   "name": "herdr-spawn",
-  "version": "1.1.2",
-  "description": "Spawn a claude, codex, opencode or omp session in a sibling Herdr pane, or a lane with a goal in its own tab, then coordinate with it.",
+  "version": "2.0.0",
+  "description": "Spawn goal-driven Herdr lane tabs and subtask panes, and route models across Claude Code, Codex, OpenCode and oh-my-pi.",
   "author": {
     "name": "mateo-di",
     "url": "https://github.com/mateo-di"

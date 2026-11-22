@@ -60,19 +60,32 @@ assert_spawn() {
   grep -Fxq 'goal_startup=ready' "$TEST_LABEL"
 }
 
-assert_spawn
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" claude ordinary "$tmp/prompt")
+[[ $out == 't-child ordinary test-agent idle' ]]
+grep -Fxq 'herdr.space=sp-parent' "$TEST_ARGS"
 grep -Fxq 'herdr.tab=tb-parent' "$TEST_ARGS"
-printf '%s\n' 'PASS: same-tab lane gets both labels without the UI'
+if grep -Fq -- --model "$TEST_ARGS"; then exit 1; fi
+printf '%s\n' 'PASS: ordinary same-tab launches get both labels without the UI or a model override'
+
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --task mechanical codex codex-small "$tmp/prompt")
+[[ $out == 't-child codex-small test-agent idle' ]]
+grep -Fq -- 'codex --model gpt-6-luna' "$TEST_ARGS"
+printf '%s\n' 'PASS: ordinary Codex receives the model before the prompt'
 
 TEST_TAB='' assert_spawn --tab "$tmp/work tree"
 tab=$(sed -n 's/^herdr\.tab=//p' "$TEST_ARGS")
 [[ -n $tab && $tab != tb-parent ]]
 grep -Fxq "$tmp/work tree" "$TEST_ARGS"
+grep -Fq -- '--model sonnet' "$TEST_ARGS"
 printf '%s\n' 'PASS: new-tab lane needs only the parent space, gets its own tab, and uses the requested cwd'
 
-TEST_TAB=$tab assert_spawn
-grep -Fxq "herdr.tab=$tab" "$TEST_ARGS"
-printf '%s\n' 'PASS: the new tab label can route a later same-tab child'
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --task complex opencode routed "$tmp/prompt")
+[[ $out == 't-child routed test-agent idle' ]]
+grep -Fxq 'herdr.tab=tb-parent' "$TEST_ARGS"
+grep -Fq -- 'opencode --standalone --prompt' "$TEST_ARGS"
+routed_config=$(find "$XDG_STATE_HOME/herdr-spawn" -path '*/oc.*/opencode.json')
+jq -e '. == {model: "openai/gpt-6.2-sol"}' "$routed_config" >/dev/null
+printf '%s\n' 'PASS: an ordinary routed OpenCode launch uses a private server and no lane plugin'
 
 assert_rejected() {
   local label=$1 out
@@ -85,16 +98,17 @@ assert_rejected() {
   [[ $out == *"$label"* && ! -s $TEST_ARGS ]]
 }
 
-TEST_SPACE='' assert_rejected herdr.space
+assert_rejected '--lane needs --tab'
 TEST_SPACE='' assert_rejected herdr.space --tab "$tmp/work tree"
-TEST_TAB='' assert_rejected herdr.tab
 printf '%s\n' 'PASS: missing placement fails before starting any terminal'
 
 mkdir -p "$tmp/agent/skills"
 ln -s "$(cd -P -- "$repo/skills/herdr-spawn" && pwd)" "$tmp/agent/skills/herdr-spawn"
 out=$(bash "$tmp/agent/skills/herdr-spawn/scripts/spawn.sh" \
-  --lane unit --goal 'Check adapters' opencode oc-lane "$tmp/prompt")
+  --tab "$tmp/work tree" --lane unit --goal 'Check adapters' --model default opencode oc-lane "$tmp/prompt")
 [[ $out == 't-child oc-lane test-agent idle' ]]
-plugin=$(jq -r '.plugins[0]' "$XDG_STATE_HOME/herdr-spawn/lane-oc-lane-opencode.json")
+goal_id=$(sed -n 's/^goal_id=//p' "$TEST_ARGS")
+plugin=$(jq -er 'select(has("model") | not) | .plugins[0]' "$XDG_STATE_HOME/herdr-spawn/goals/$goal_id/opencode.json")
 [[ $plugin == "file://$(cd -P -- "$repo" && pwd)/adapters/opencode/herdr-lanes" ]]
+if grep -Fq -- OPENCODE_CONFIG_CONTENT "$TEST_ARGS"; then exit 1; fi
 printf '%s\n' 'PASS: a symlinked skill directory still finds the repo adapters'

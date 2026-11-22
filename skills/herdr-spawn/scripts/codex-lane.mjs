@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [startupDir, brief, goal] = process.argv.slice(2);
+const [startupDir, brief, goal, model] = process.argv.slice(2);
 const statusFile = join(startupDir, 'result');
 const inheritShell = 'shell_environment_policy.inherit=all';
 
@@ -76,6 +76,7 @@ async function bootstrap(objective) {
         const cwd = process.cwd();
         const { thread } = (await request('thread/start', {
           cwd, ephemeral: false, config: { 'features.goals': false },
+          ...(model === undefined ? {} : { model }),
         })) ?? {};
         if (!thread || thread.ephemeral !== false || thread.cwd !== cwd ||
             !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(thread.id) ||
@@ -132,12 +133,17 @@ try {
   accessSync(startupDir);
   accessSync(brief);
   if (!goal.trim()) throw new Error('the lane objective is empty');
+  if (model !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._+@:-]*(\/[A-Za-z0-9][A-Za-z0-9._+@:-]*)*$/.test(model)) {
+    throw new Error('expected a safe model ID');
+  }
   const objective = `${goal.trim()}\n\nBefore working, read and follow the lane protocol and brief at ${JSON.stringify(brief)}.`;
   const thread = await bootstrap(objective);
   accessSync(startupDir);
   // An embedded server keeps this shell's env, rather than a shared daemon's.
   // Resuming an active goal on 0.171.0 triggers native continuation without a positional prompt.
-  const tui = spawn('codex', ['resume', '--no-daemon', '-c', inheritShell, '--', thread.id], {
+  const tui = spawn('codex', [
+    'resume', '--no-daemon', '-c', inheritShell, ...(model === undefined ? [] : ['--model', model]), '--', thread.id,
+  ], {
     stdio: 'inherit',
   });
   const exit = closed(tui);

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal "<objective>"] <agent> <name> <prompt-file> [<pane-id> <right|down>]
+# Usage: spawn.sh [--tab <dir> [--lane <unit|driver>] | --subtask-of <root>] [--goal <objective>]
+#                 [--task <class>] [--model <id|default>] <agent> <name> <prompt-file> [<pane-id> <right|down>]
 # Splits a sibling pane, types the agent's launch line into its interactive shell (so wrappers, aliases and
 # functions apply, and `$(cat file)` expands there), waits for Herdr to detect the agent, names it, and prints
 # "<pane-id> <name> <agent-kind> <status>". Without the optional pane/direction, a picker keeps the tab an even
@@ -12,7 +13,8 @@
 # child as a lane of the calling pane: LANE_MODE and LANE_COORDINATOR are exported in its shell, its pane gets
 # lane_of, lane_mode and lane_state metadata tokens, and lanes-watch.sh runs for the caller (lane.sh is the lane's
 # side of the protocol).
-# --goal "<objective with its done criterion>" is required with --lane and refused without it: a lane always has a
+# --subtask-of <root> creates a unit lane in the root's tab and workdir, still reporting to the caller.
+# --goal "<objective with its done criterion>" is required for lanes and refused otherwise: a lane always has a
 # goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it starts the child as an hc terminal of the caller (lane state
@@ -23,7 +25,7 @@
 # line; blank lines and full-line # comments are ignored. With --lane the key is `lane:<agent>`. Placeholders,
 # each shell-quoted: {name}, {prompt} (reads the prompt file), {promptfile}, {goal}, {slashgoal} (a /goal line
 # pointing at the prompt file), {adapters} (the repo's adapters dir), {occonfig} (an OpenCode config file that
-# loads the lane plugin, written only when the template uses it).
+# can load the lane plugin and set a model), {model}, {modelarg} (optional --model pair).
 set -euo pipefail
 # bash 5.2 expands "&" in a ${var//pat/repl} replacement to the match; this script replaces text only where a path is inserted.
 shopt -u patsub_replacement 2>/dev/null || true
@@ -41,13 +43,15 @@ templates() {
       printf '%s custom %s\n' "$a" "$t"
     done <"$conf"
   fi
-  printf '%s\n' 'claude builtin claude -n {name} {prompt}' 'codex builtin codex {prompt}' \
-    'opencode builtin opencode --prompt {prompt}' 'omp builtin omp {prompt}' \
-    'lane:claude builtin claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
+  printf '%s\n' 'claude builtin claude {modelarg} -n {name} {prompt}' 'codex builtin codex {modelarg} {prompt}' \
+    'opencode builtin opencode --prompt {prompt}' 'omp builtin omp {modelarg} {prompt}' \
+    'lane:claude builtin claude {modelarg} -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
     'lane:codex builtin {builtin-codex-lane}' \
     'lane:opencode builtin export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
-    'lane:omp builtin omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
+    'lane:omp builtin omp {modelarg} --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
 }
+
+lookup() { templates | awk -v a="$1" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }'; }
 
 pick() {
   herdr pane layout --current | jq -r --arg caller "${HERDR_PANE_ID:-}" '
@@ -66,14 +70,17 @@ pick() {
       end'
 }
 
-usage="usage: spawn.sh [--tab <dir>] [--lane <unit|driver> --goal <objective>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
-tabdir="" lane="" goal=""
+usage="usage: spawn.sh [--tab <dir> [--lane <unit|driver>] | --subtask-of <root>] [--goal <objective>] [--task <class>] [--model <id|default>] <agent> <name> <prompt-file> [<pane-id> <right|down>]"
+tabpath="" tabdir="" lane="" goal="" root_ref="" task_class="" model_option=""
+model_pattern='^[A-Za-z0-9][A-Za-z0-9._+@:-]*(/[A-Za-z0-9][A-Za-z0-9._+@:-]*)*$'
+valid_model() { local LC_ALL=C; [[ $1 =~ $model_pattern ]]; }
+absolute_dir() { CDPATH='' cd "$@" && printf '%s.' "$PWD"; }
 while [ $# -gt 0 ]; do
   case $1 in
     --tab)
       [ $# -ge 5 ] || die "$usage"
       [ -d "$2" ] || die "--tab directory not found: $2"
-      tabdir=$(CDPATH='' cd -- "$2" && pwd)
+      tabpath=$2
       shift 2 ;;
     --lane)
       [ $# -ge 5 ] || die "$usage"
@@ -84,40 +91,168 @@ while [ $# -gt 0 ]; do
       [[ "$2" == *[![:space:]]* ]] || die "--goal needs a non-empty objective"
       goal=$2
       shift 2 ;;
+    --subtask-of)
+      [ $# -ge 5 ] || die "$usage"
+      [[ -n $2 && $2 != -* ]] || die "--subtask-of needs a root lane name or ID"
+      root_ref=$2
+      shift 2 ;;
+    --task)
+      [ $# -ge 5 ] || die "$usage"
+      case $2 in mechanical|simple|complex|exceptional|fact-check) task_class=$2 ;;
+        *) die "--task must be mechanical, simple, complex, exceptional, or fact-check" ;;
+      esac
+      shift 2 ;;
+    --model)
+      [ $# -ge 5 ] || die "$usage"
+      valid_model "$2" || die "--model needs a safe model ID or default"
+      model_option=$2
+      shift 2 ;;
     *) break ;;
   esac
 done
-[ -z "$goal" ] || [ -n "$lane" ] || die "--goal needs --lane"
-[ -z "$lane" ] || [ -n "$goal" ] || die "--lane needs --goal \"<objective with its done criterion>\""
+if [ -n "$root_ref" ]; then
+  [ -z "$tabpath$lane" ] && [ $# -eq 3 ] || die "--subtask-of does not combine with --tab, --lane, or an explicit split"
+  lane=unit
+elif [ -n "$lane" ]; then
+  [ -n "$tabpath" ] || die "--lane needs --tab <dir>"
+  tabdir=$(absolute_dir -P -- "$tabpath") || die "could not resolve --tab directory: $tabpath"
+  tabdir=${tabdir%.}
+elif [ -n "$tabpath" ]; then
+  tabdir=$(absolute_dir -- "$tabpath") || die "could not resolve --tab directory: $tabpath"
+  tabdir=${tabdir%.}
+fi
+[ -z "$goal" ] || [ -n "$lane" ] || die "--goal needs --lane or --subtask-of"
+[ -z "$lane" ] || [ -n "$goal" ] || die "a lane needs --goal \"<objective with its done criterion>\""
 [ $# -eq 3 ] || { [ $# -eq 5 ] && [ -z "$tabdir" ]; } || die "$usage"
 agent=$1 name=$2 promptfile=$3
+case $agent in lane:*|model:*) die "agent must not start with lane: or model:" ;; esac
 [[ $name =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || die "name must match ^[a-z][a-z0-9_-]{0,31}\$"
 [ -r "$promptfile" ] || die "prompt file not readable: $promptfile"
+command -v jq >/dev/null || die "jq is required"
 # The child's shell may start in another directory (--tab), so it needs an absolute path.
 promptfile=$(CDPATH='' cd -- "$(dirname -- "$promptfile")" && pwd)/${promptfile##*/}
 
 statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
+[[ $statedir = /* ]] || statedir=$PWD/$statedir
 # -P: the skill directory is often a symlink to the repo (the README's install), and the walk up to adapters must
 # leave from the repo, not from the link's parent.
 scriptdir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
 if [ -n "$lane" ]; then
-  [[ $statedir = /* ]] || statedir=$PWD/$statedir
   callerprompt=$promptfile
   key=lane:$agent
 else
   key=$agent
 fi
 
-entry=$(templates | awk -v a="$key" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }')
+entry=$(lookup "$key")
 origin=${entry%% *}
 template=${entry#* }
 if [ -z "$template" ]; then
   if [ -n "$lane" ]; then
     die "unknown lane agent '$agent'; known: $(templates | awk '/^lane:/ { sub(/^lane:/, "", $1); print $1 }' | sort -u | paste -sd' ' -); add lane:$agent to $conf"
   fi
-  die "unknown agent '$agent'; known: $(templates | awk '$1 !~ /^lane:/ { print $1 }' | sort -u | paste -sd' ' -); add one to $conf"
+  die "unknown agent '$agent'; known: $(templates | awk '$1 !~ /^(lane|model):/ { print $1 }' | sort -u | paste -sd' ' -); add one to $conf"
 fi
+
+explicit_task=$task_class
+case "$task_class:$lane" in
+  :driver) task_class=complex ;;
+  :unit) task_class=simple ;;
+esac
+model=
+route_model() {
+  [ "$model_option" != default ] || return 0
+  [ -n "$model_option$task_class" ] || return 0
+  if [ "$origin" = custom ] && [[ $template != *'{model}'* && $template != *'{modelarg}'* ]]; then
+    [ -z "$model_option$explicit_task" ] ||
+      die "$key template cannot route a model; add {model} or {modelarg}, or use --model default"
+    echo "spawn.sh: $key custom template kept its own model; replace any fixed --model with {modelarg} in $conf to enable routing" >&2
+    return 0
+  fi
+  if [ -n "$model_option" ]; then
+    model=$model_option
+    return 0
+  fi
+  local tier index override
+  local -a defaults
+  case $task_class in
+    mechanical) tier=small index=0 ;;
+    simple) tier=standard index=1 ;;
+    complex) tier=strong index=2 ;;
+    exceptional|fact-check) tier=frontier index=3 ;;
+  esac
+  override=$(lookup "model:$agent:$tier")
+  if [ -n "$override" ]; then
+    model=${override#* }
+    valid_model "$model" && [ "$model" != default ] || die "invalid model ID in model:$agent:$tier in $conf"
+    return 0
+  fi
+  case $agent in
+    claude) defaults=(haiku sonnet opus fable) ;;
+    codex|opencode|omp) defaults=(gpt-6-luna gpt-6.1-terra gpt-6.2-sol gpt-6.2-astra) ;;
+    *)
+      [ -z "$explicit_task" ] || die "no model mapping for $agent/$tier; add model:$agent:$tier to $conf or use --model default"
+      echo "spawn.sh: no model mapping for $agent/$tier; add model:$agent:$tier to $conf to enable routing" >&2
+      return 0 ;;
+  esac
+  model=${defaults[index]}
+  case $agent in
+    opencode) model=openai/$model ;;
+    omp) model=openai-codex/$model ;;
+  esac
+}
+route_model
+if [ "$origin" = builtin ]; then
+  if [ -z "$model" ]; then
+    template=${template/' {modelarg}'/}
+  elif [ "$key" = opencode ]; then
+    # shellcheck disable=SC2016 # Inspect the child shell's environment at launch.
+    template='if [ -z "${OPENCODE_CONFIG:-}" ]; then export OPENCODE_CONFIG={occonfig}; fi; opencode --standalone --prompt {prompt}'
+  fi
+fi
+
+opencode_plugin="file://$adapters/opencode/herdr-lanes"
+opencode_config() {
+  local config plugin=''
+  if [ -n "$lane" ]; then
+    config=$goal_dir/opencode.json
+  else
+    mkdir -p "$statedir" || return 1
+    if [ -n "$model" ]; then
+      config=$(mktemp -d "$statedir/oc.XXXXXXXXXXXX")/opencode.json || return 1
+    else
+      config=$statedir/lane-$name-opencode.json
+    fi
+  fi
+  if [ -n "$lane" ] || [ "$origin" = custom ]; then plugin=$opencode_plugin; fi
+  jq -n --arg p "$plugin" --arg model "$model" '
+    (if $p == "" then {} else {plugins: [$p]} end)
+    + (if $model == "" then {} else {$model} end)' >"$config" || return 1
+  printf %q "$config"
+}
+
+# shellcheck disable=SC2016 # jq variables, not shell variables.
+oc_inline_filter='
+  (env.OPENCODE_CONFIG_CONTENT // "" | if . == "" then {} else fromjson end)
+  | if type != "object" then error("expected one JSON object") else . end
+  | .model = $model
+  | if $plugin != "" and (.plugins | type) == "array"
+      and all(.plugins[]; . != $plugin and (type != "array" or .[0] != $plugin))
+    then .plugins += [$plugin] else . end
+'
+oc_inline=''
+if [ "$origin:$agent" = builtin:opencode ] && [ -n "$model" ]; then
+  inline_plugin=''
+  if [ -n "$lane" ]; then inline_plugin=$opencode_plugin; fi
+  # Check the caller's environment before placement; merge the child's own inline config at launch.
+  # The inherited JSON can hold credentials, so never paste it into a pane or print parse errors.
+  jq -nce --arg model "$model" --arg plugin "$inline_plugin" "$oc_inline_filter" >/dev/null 2>&1 ||
+    die "OPENCODE_CONFIG_CONTENT must contain one valid JSON object to route a model"
+  printf -v oc_inline 'jq -nce --arg model %q --arg plugin %q %q 2>/dev/null' \
+    "$model" "$inline_plugin" "$oc_inline_filter"
+fi
+
 # Fills the template's placeholders in one pass, so substituted text (a goal that itself holds "{name}") is
 # never scanned again and every inserted value is shell-quoted.
 expand() {
@@ -132,19 +267,61 @@ expand() {
       "goal}"*) out+=$(printf %q "$goal"); rest=${rest#"goal}"} ;;
       "slashgoal}"*) out+=$(printf %q "/goal $goal (brief: $promptfile)"); rest=${rest#"slashgoal}"} ;;
       "adapters}"*) out+=$(printf %q "$adapters"); rest=${rest#"adapters}"} ;;
+      "model}"*) out+=$(printf %q "$model"); rest=${rest#"model}"} ;;
+      "modelarg}"*)
+        if [ -n "$model" ]; then out+=$(printf -- '--model %q' "$model"); fi
+        rest=${rest#"modelarg}"} ;;
       "occonfig}"*)
-        local config=$statedir/lane-$name-opencode.json
-        if [ -n "$lane" ]; then config=$goal_dir/opencode.json; else mkdir -p "$statedir" || return 1; fi
-        jq -n --arg p "file://$adapters/opencode/herdr-lanes" '{plugins: [$p]}' >"$config" || return 1
-        out+=$(printf %q "$config"); rest=${rest#"occonfig}"} ;;
+        out+=$(opencode_config) || return 1
+        rest=${rest#"occonfig}"} ;;
       *) out+="{" ;;
     esac
   done
   printf '%s' "$out$rest"
 }
-command -v jq >/dev/null || die "jq is required"
+codex_start='' goal_id='' goal_target='' goal_surface=herdr parent_lane='' workdir=$tabdir
 
-codex_start='' goal_id='' goal_target='' goal_surface=herdr
+resolve_parent_lane() {
+  local coordinator=$1 info root required ref manifest canonical
+  if [ "$goal_surface" = hc ]; then
+    placement=$(unset HC_TERMINAL_ID; hc get "$root_ref" --json) || die "no root lane terminal $root_ref"
+    root=$(jq -c '{id: .address, meta: .labels}' <<<"$placement")
+  elif [[ $root_ref != *:* ]] && info=$(herdr agent get "$root_ref" 2>/dev/null); then
+    root=$(jq -c '.result.agent | {id: .pane_id, meta: .tokens}' <<<"$info")
+  else
+    info=$(herdr pane get "$root_ref") || die "no root lane pane $root_ref"
+    root=$(jq -c '.result.pane | {id: .pane_id, meta: .tokens}' <<<"$info")
+  fi
+  required=$(jq -ec --arg coordinator "$coordinator" '
+    select((.id | strings | test("^[^-[:space:]][^[:space:]]*$"))
+      and .meta.lane_of == $coordinator and .meta.goal_startup == "ready")
+  ' <<<"$root") || die "$root_ref is not a ready lane of the caller"
+  parent_lane=$(jq -r '.id' <<<"$required")
+  ref=$(jq -r '.meta.goal_id // empty' <<<"$required")
+  [[ $ref =~ ^g\.[[:alnum:]]{12}$ ]] || die "$root_ref has no valid goal manifest reference"
+  manifest=$statedir/goals/$ref/goal.json
+  [ ! -L "${manifest%/*}" ] && [ -O "${manifest%/*}" ] &&
+    [ ! -L "$manifest" ] && [ -O "$manifest" ] && [ -f "$manifest" ] &&
+    [ -n "$(find "${manifest%/*}" -prune -type d -perm 0700 -print)" ] &&
+    [ -n "$(find "$manifest" -prune -perm 0400 -print)" ] ||
+    die "$root_ref has no private goal manifest $ref"
+  workdir=$(jq -ser --argjson root "$required" --arg pattern "$model_pattern" '
+    select(length == 1) | .[0] | select(
+      .goal_id == $root.meta.goal_id and .goal_mode == $root.meta.goal_mode
+      and (.goal_mode == "managed" or .goal_mode == "native" or .goal_mode == "custom")
+      and .lane_mode == $root.meta.lane_mode and (.lane_mode == "unit" or .lane_mode == "driver")
+      and (.objective | strings | test("[^[:space:]]")) and (.agent | strings | length > 0)
+      and has("parent_lane") and .parent_lane == null
+      and (.task_class == "mechanical" or .task_class == "simple" or .task_class == "complex"
+        or .task_class == "exceptional" or .task_class == "fact-check")
+      and has("model") and (.model == null or (.model | strings | test($pattern)))
+    ) | .workdir | strings | select(startswith("/") and (contains("\u0000") | not)) | . + "."
+  ' "$manifest") || die "$root_ref is not a registered root lane with a matching goal manifest"
+  workdir=${workdir%.}
+  canonical=$(absolute_dir -P -- "$workdir" 2>/dev/null) ||
+    die "workdir for root lane $root_ref no longer exists: $workdir"
+  [ "${canonical%.}" = "$workdir" ] || die "workdir for root lane $root_ref is no longer canonical: $workdir"
+}
 
 create_goal_manifest() {
   case "$origin:$agent" in
@@ -160,7 +337,11 @@ create_goal_manifest() {
   (
     umask 077
     jq -n --arg goal_id "$goal_id" --arg objective "$goal" --arg goal_mode "$goal_mode" \
-      --arg agent "$agent" --arg lane_mode "$lane" '{ $goal_id, $objective, $goal_mode, $agent, $lane_mode }' >"$goal_dir/goal.json" &&
+      --arg agent "$agent" --arg lane_mode "$lane" --arg parent_lane "$parent_lane" \
+      --arg workdir "$workdir" --arg task_class "$task_class" --arg model "$model" '
+      { $goal_id, $objective, $goal_mode, $agent, $lane_mode, $workdir, $task_class,
+        parent_lane: ($parent_lane | select(length > 0) // null), model: ($model | select(length > 0) // null) }
+    ' >"$goal_dir/goal.json" &&
       chmod 400 "$goal_dir/goal.json"
   ) || die "could not write lane goal manifest $goal_id"
 }
@@ -217,10 +398,15 @@ prepare_launch() {
     local result
     codex_start=$(mktemp -d "$statedir/.codex-start.XXXXXXXX") || die "could not create Codex startup directory"
     launch=$(printf 'node %q %q %q %q' "$scriptdir/codex-lane.mjs" "$codex_start" "$promptfile" "$goal")
+    if [ -n "$model" ]; then launch+=" $(printf %q "$model")"; fi
     result=$(printf %q "$codex_start/result")
     launch+=" || { if [ -d $(printf %q "$codex_start") ] && [ ! -s $result ]; then printf '%s\n' 'error Codex lane helper failed (Node.js 18+ is required in the child shell)' > $result; fi; }"
   else
     launch=$(expand "$template") || die "could not prepare the $key launch"
+    if [ -n "$oc_inline" ]; then
+      # shellcheck disable=SC2016 # Merge only after entering the child shell.
+      launch='( set +x; if OPENCODE_CONFIG_CONTENT=$('"$oc_inline"'); then export OPENCODE_CONFIG_CONTENT; '"$launch"'; else printf "%s\n" "spawn.sh: invalid child OPENCODE_CONFIG_CONTENT; OpenCode not started" >&2; exit 1; fi )'
+    fi
   fi
 }
 
@@ -232,18 +418,27 @@ prepare_launch() {
 # child doesn't take the person's focus; a split does.
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   command -v hc >/dev/null || die "hc (herdr-core) is required"
-  if [ $# -eq 3 ] || [ -n "$lane" ]; then
+  if [ $# -eq 3 ]; then
     if hc get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
     # The placement labels live on the caller's core, even when the window runs on another host.
-    coordinator=$(hc get "$HC_TERMINAL_ID" --json) || die "could not read coordinator terminal $HC_TERMINAL_ID"
-    space=$(jq -er '.labels["herdr.space"] | strings | select(length > 0)' <<<"$coordinator") ||
-      die "coordinator terminal $HC_TERMINAL_ID has no herdr.space label; open it in Herdr first"
+    goal_surface=hc
+    if [ -n "$root_ref" ]; then
+      resolve_parent_lane "$HC_TERMINAL_ID"
+      label_owner="root lane terminal $parent_lane"
+      no_tab_hint=
+    else
+      placement=$(hc get "$HC_TERMINAL_ID" --json) || die "could not read coordinator terminal $HC_TERMINAL_ID"
+      label_owner="coordinator terminal $HC_TERMINAL_ID"
+      no_tab_hint='; use --tab or start from a tab created in Herdr App'
+    fi
+    space=$(jq -er '.labels["herdr.space"] | strings | select(length > 0)' <<<"$placement") ||
+      die "$label_owner has no herdr.space label; open it in Herdr first"
     if [ -n "$tabdir" ]; then
       # The app creates unknown tab IDs from labels but does not label tabs it assigns itself.
       tab="tbspawn-$(date +%s)-$$-$RANDOM"
     else
-      tab=$(jq -er '.labels["herdr.tab"] | strings | select(length > 0)' <<<"$coordinator") ||
-        die "coordinator terminal $HC_TERMINAL_ID has no herdr.tab label; use --tab or start from a tab created in Herdr App"
+      tab=$(jq -er '.labels["herdr.tab"] | strings | select(length > 0)' <<<"$placement") ||
+        die "$label_owner has no herdr.tab label$no_tab_hint"
     fi
     shell=${SHELL:-/bin/sh}
     prepare_launch
@@ -251,7 +446,7 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     if [ -n "$lane" ]; then
       line="export LANE_MODE=$(printf %q "$lane"); export LANE_COORDINATOR=$(printf %q "$HC_TERMINAL_ID"); $line"
     fi
-    cwd=$tabdir
+    cwd=$workdir
     [ -n "$cwd" ] || cwd=$PWD
     hc_argv=(--bg --json --name "$name" --cwd "$cwd" --parent "$HC_TERMINAL_ID" --outlive-parent)
     hc_argv+=(--label "herdr.space=$space" --label "herdr.tab=$tab")
@@ -265,7 +460,7 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     term=$(jq -r '.address // empty' <<<"$out")
     [ -n "$term" ] || die "hc run returned no terminal: $out"
     if [ -n "$lane" ]; then
-      goal_surface=hc goal_target=$term
+      goal_target=$term
     fi
 
     inspect="hc read $term --lines 40"
@@ -311,8 +506,9 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
 fi
 
 [ "${HERDR_ENV:-}" = 1 ] || die "not inside Herdr (neither HERDR_ENV=1 nor HC_TERMINAL_ID)"
-[ -z "$lane" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "--lane needs HERDR_PANE_ID, the coordinator's pane"
+[ -z "$lane" ] || [ -n "${HERDR_PANE_ID:-}" ] || die "a lane needs HERDR_PANE_ID, the coordinator's pane"
 if herdr agent get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
+if [ -n "$root_ref" ]; then resolve_parent_lane "$HERDR_PANE_ID"; fi
 prepare_launch
 
 if [ -n "$tabdir" ]; then
@@ -321,7 +517,9 @@ if [ -n "$tabdir" ]; then
   pane=$("${tabcmd[@]}" --cwd "$tabdir" --label "$name" --no-focus | jq -r '.result.root_pane.pane_id')
   { [ -n "$pane" ] && [ "$pane" != null ]; } || die "tab create returned no pane id"
 else
-  if [ $# -eq 5 ]; then
+  if [ -n "$parent_lane" ]; then
+    target=$parent_lane dir=right
+  elif [ $# -eq 5 ]; then
     target=$4 dir=$5
   else
     picked=$(pick) || die "could not pick a pane to split; pass <pane-id> <right|down>"
@@ -330,7 +528,7 @@ else
   { [ -n "${target:-}" ] && [ "$target" != null ] && [ -n "${dir:-}" ] && [ "$dir" != null ]; } ||
     die "could not pick a pane to split; pass <pane-id> <right|down>"
 
-  pane=$(herdr pane split "$target" --direction "$dir" --cwd "$PWD" --no-focus | jq -r '.result.pane.pane_id')
+  pane=$(herdr pane split "$target" --direction "$dir" --cwd "${workdir:-$PWD}" --no-focus | jq -r '.result.pane.pane_id')
   { [ -n "$pane" ] && [ "$pane" != null ]; } || die "split of $target returned no pane id"
 fi
 if [ -n "$lane" ]; then

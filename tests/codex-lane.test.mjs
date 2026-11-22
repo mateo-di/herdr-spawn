@@ -47,6 +47,7 @@ const { createInterface } = require('node:readline');
 const { join } = require('node:path');
 const args = process.argv.slice(2);
 const [command] = args;
+const model = process.env.FAKE_MODEL;
 const lane = process.cwd();
 const id = process.env.FAKE_THREAD_ID ?? '${id}';
 const rollout = join(lane, 'rollout.jsonl');
@@ -56,7 +57,7 @@ assert.equal(process.env.HERDR_PANE_ID, 'child');
 assert.equal(process.env.LANE_MODE, 'unit');
 assert.equal(process.env.LANE_COORDINATOR, 'parent');
 if (command === 'resume') {
-  assert.deepEqual(args, ['resume', '--no-daemon', '-c', '${inheritShell}', '--', id]);
+  assert.deepEqual(args, ['resume', '--no-daemon', '-c', '${inheritShell}', ...(model ? ['--model', model] : []), '--', id]);
   writeFileSync(join(lane, 'resumed'), id);
   if (process.env.FAKE === 'resume-exited') process.exit(17);
   const interval = setInterval(() => {
@@ -79,7 +80,7 @@ if (command === 'resume') {
     if (method === 'initialize') reply({});
     else if (method === 'initialized') write({ method: 'irrelevant/notification' });
     else if (method === 'thread/start') {
-      assert.deepEqual(params, { cwd: lane, ephemeral: false, config: { 'features.goals': false } });
+      assert.deepEqual(params, { cwd: lane, ephemeral: false, config: { 'features.goals': false }, ...(model ? { model } : {}) });
       reply({ thread: { id, path: rollout, cwd: lane, ephemeral: false } });
     } else if (method === 'thread/goal/set') {
       assert.equal(params.threadId, id);
@@ -211,13 +212,14 @@ switch (noun + ' ' + verb) {
     const objective = `${goal}\nLane: ${name}`;
     await mkdir(lane);
     try {
+      const model = index === 0 ? 'gpt-6.1-terra' : '';
       const launching = run('bash', [spawnScript, '--tab', lane, '--lane', 'unit',
-        '--goal', objective, 'codex', name, brief], {
+        '--goal', objective, ...(index === 0 ? [] : ['--model', 'default']), 'codex', name, brief], {
         cwd: root, timeout: 10_000,
         env: {
           ...env, PATH: `${root}:${env.PATH}`, HERDR_ENV: '1', HERDR_PANE_ID: 'parent',
           XDG_STATE_HOME: join(root, 'state'), HERDR_SPAWN_CONFIG: join(root, 'no-override'),
-          FAKE_HERDR_ROOT: root, FAKE_THREAD_ID: threadId, FAKE: 'ok',
+          FAKE_HERDR_ROOT: root, FAKE_THREAD_ID: threadId, FAKE: 'ok', FAKE_MODEL: model,
         },
       });
       const [{ stdout }] = await Promise.all([launching, (async () => {
@@ -302,7 +304,8 @@ shell_snapshot = false
 trust_level = "trusted"
 `);
   const shellQuote = arg => `'${arg.replaceAll("'", "'\\''")}'`;
-  const command = [process.execPath, helper, startup, brief, goal].map(shellQuote).join(' ');
+  const requestedModel = 'gpt-5.4-mini';
+  const command = [process.execPath, helper, startup, brief, goal, requestedModel].map(shellQuote).join(' ');
   const pidFile = join(root, 'pty-pid');
   const launch = `stty rows 40 cols 120; echo "$$" > ${shellQuote(pidFile)}; exec ${command}`;
   const pty = spawn('script', ['-q', '-e', '-c', launch, '/dev/null'], {
@@ -318,6 +321,7 @@ trust_level = "trusted"
     for (let attempt = 0; attempt < 100 && !modelRequest; attempt++) await delay(50);
     assert.ok(modelRequest, 'the TUI did not make a Responses request');
     assert.equal(authorization, `Bearer ${syntheticKey}`);
+    assert.equal(modelRequest.model, requestedModel);
     const text = modelRequest.input.flatMap(item => item.content ?? []).map(content => content.text).join('\n');
     assert.match(text, /Continue working toward the active thread goal/);
     const input = JSON.stringify(modelRequest.input);
