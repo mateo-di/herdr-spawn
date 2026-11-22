@@ -45,15 +45,27 @@ Ask in natural language:
 - "Open an opencode pane and have it write the migration tests."
 - "Hand this investigation to a new claude session." (writes a handoff doc first)
 - "Start three parallel workers, one per package." (writes a lanes doc first)
-- "Run these two tickets as driver lanes." (one tab and worktree per lane; each lane runs its task through subagents with `hierarchical-implementation` and reports its integrated result back)
+- "Run these two tickets as driver lanes." (one tab and worktree per ticket; visible subtasks share their ticket's tab)
 
 ## Lanes
 
-A child that changes a repo gets its own worktree and its own tab: `spawn.sh --tab <worktree> --lane <unit|driver> --goal "<objective and done criterion>" <agent> <name> <prompt-file>` opens a tab labelled `<name>` at the worktree without taking focus. Its prompt sets `Lane mode: unit` (execute one unit, reviewed by the caller) or `Lane mode: driver` (own a whole task, delegate it to subagents, report the verified result); keep that line even with `--lane`, for harnesses without a gate. `--lane` also exports `LANE_MODE` and `LANE_COORDINATOR` to the lane and tags its pane (the `hierarchical-implementation` gate reads `LANE_MODE`). That gives a three-level hierarchy: the session you talk to, lanes in tabs, and each driver lane's subagents.
+A root lane gets a worktree and a new tab of its own:
 
-In the Herdr app the lane is an `hc` terminal, a child of the coordinator, shown as a tab in its space or in the coordinator's tab without `--tab`. `spawn.sh` reads the coordinator's `herdr.space` label from `hc` and either reuses `herdr.tab` or assigns a new tab ID with `--tab`. It launches on the coordinator's host, even when the window is on another machine. `lane.sh done|escalate` sends the notice straight to the coordinator with `hc send` (tagged `<hc from="tN name">`); `hc` itself notes blocked and exited lanes, a lane that stops without reporting gets a stopped notice from the stop hook, and the stalled notice is TUI-only. In the app, `hc ls` and `hc get <lane>` show lanes and their `lane_*` labels.
+```bash
+spawn.sh --tab /path/to/worktree --lane driver --goal 'Land the migration with verified tests' claude migration root.md
+spawn.sh --subtask-of migration --goal 'Add migration test cases' --task simple codex migration-tests tests.md
+spawn.sh --subtask-of migration --goal 'Check claims against upstream docs' --task fact-check opencode migration-check check.md
+```
 
-`--goal` requires a non-blank objective and is only accepted with `--lane`. `spawn.sh` writes the lane protocol, goal, and your prompt file to `brief.md` in that launch's private `herdr-spawn/goals/<goal_id>/` state directory. Any generated OpenCode config lives there too, so reusing a lane name cannot overwrite either file.
+`--lane` requires `--tab`; it opens a new tab labelled with the lane name without taking focus. `unit` executes one unit, reviewed by the caller; `driver` owns the overall result and integrates it. A subtask is a `unit` in a separate pane in the root's tab, in the root's original workdir. The original coordinator starts and receives reports from all panes; the root is a placement target, not a new reporting parent. `--subtask-of` accepts a ready, registered root lane's name, pane ID, or hc terminal ID and cannot be combined with `--tab`, `--lane`, or an explicit split. Nested subtasks are rejected.
+
+Upgrading from 1.x: pass `--tab <worktree>` to existing root lane commands. Older lanes keep running, but only roots started with 2.x can host `--subtask-of` panes.
+
+Classify each pane independently. Run work in parallel only when scopes do not overlap and neither task needs the other's result. Serialize writers to shared files or state, and start dependent panes only when their inputs are ready. Do not assign a visible subtask to an invisible background agent as well.
+
+In the Herdr app, `hc` gives a root lane a new tab ID in the coordinator's space. For subtasks it uses the root's `herdr.space` and `herdr.tab` labels, but still uses the original coordinator as `hc --parent`. No GUI command is needed, even when the window is on another machine. `lane.sh done|escalate` sends the notice straight to the coordinator with `hc send` (tagged `<hc from="tN name">`); `hc` itself notes blocked and exited lanes, a lane that stops without reporting gets a stopped notice from the stop hook, and the stalled notice is TUI-only. In the app, `hc ls` and `hc get <lane>` show lanes and their `lane_*` labels.
+
+Both `--lane` and `--subtask-of` require a non-blank `--goal`. `spawn.sh` exports `LANE_MODE` and `LANE_COORDINATOR` and writes the lane protocol, goal, and caller's brief to `brief.md` in that launch's private `herdr-spawn/goals/<goal_id>/` state directory. Any generated OpenCode lane config lives there too, so reusing a lane name cannot overwrite either file.
 
 The built-in Codex lane starts a new saved thread from the child shell, sets and reads back an active native goal through the Codex app-server, then resumes **that thread** in the pane. The objective is your `--goal` with an instruction to read the absolute path of the composed brief. Codex starts a native goal turn on resume; no positional `/goal` prompt is sent. If goals are disabled in Codex, the goal cannot be verified, or the TUI does not begin pursuing it, startup reports an error and leaves the pane open for inspection. This does not change the coordinator's goal. To set a goal in its own thread, a Codex coordinator can use `create_goal` when explicitly directed by the user, or the user can enter `/goal` in that TUI.
 
@@ -66,6 +78,10 @@ Inspect a lane's original objective and current status with `scripts/lane.sh goa
   "goal_mode": "managed",
   "agent": "opencode",
   "lane_mode": "unit",
+  "parent_lane": null,
+  "workdir": "/path/to/worktree",
+  "task_class": "simple",
+  "model": "openai/gpt-6.1-terra",
   "goal_startup": "ready",
   "goal_verification": "not_applicable",
   "goal_status": "active"
@@ -113,7 +129,7 @@ A Claude Code caller with a `claude` child talks to it through SendMessage in bo
 | `opencode` | `opencode --prompt {prompt}` |
 | `omp` | `omp {prompt}` |
 
-With `--lane`, the `lane:<agent>` template is used instead:
+For root lanes and subtasks, the `lane:<agent>` template is used instead:
 
 | Lane agent | Template |
 |---|---|
@@ -135,9 +151,34 @@ gemini  gemini -i {prompt}
 
 The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead). In the Herdr app the new pane runs it with `$SHELL -ic`, for the same reason. The built-in Codex lane adapter uses the `codex` executable on that shell's `PATH` for both steps. To use a shell alias, function, or custom launch flow instead, set a `lane:codex` entry; that fully replaces the adapter and is responsible for native goal setup. Codex treats a positional `/goal …` argument as ordinary text.
 
+### Model routing
+
+`--task <class>` selects a tier per launch. Root drivers default to `complex`; root units and subtasks default to `simple`. Ordinary launches without either routing flag keep their existing model. An explicit `--model <id>` wins over the task class; `--model default` opts out of routing and leaves model choice to the harness or custom launcher.
+
+| Class | Use | Tier | Claude Code | Codex |
+|---|---|---|---|---|
+| `mechanical` | Unambiguous, repeatable work | `small` | `haiku` | `gpt-6-luna` |
+| `simple` | Bounded work with clear tests | `standard` | `sonnet` | `gpt-6.1-terra` |
+| `complex` | Cross-cutting work or integration | `strong` | `opus` | `gpt-6.2-sol` |
+| `exceptional` | Especially difficult or high-stakes judgment | `frontier` | `fable` | `gpt-6.2-astra` |
+| `fact-check` | Independently verify claims and sources | `frontier` | `fable` | `gpt-6.2-astra` |
+
+OpenCode uses the Codex IDs with `openai/` prepended; oh-my-pi uses `openai-codex/`. Herdr Spawn passes the selected model to the harness; it does not verify account access or pick a fallback. Built-in routed OpenCode launches use a private server and merge the selected model into the child shell's `OPENCODE_CONFIG_CONTENT`, keeping the other inline settings; malformed inline JSON aborts the launch.
+
+Override a tier in `agents.conf` with `model:<agent>:<tier> <id>`. Claude aliases depend on the host: on Anthropic, `sonnet` and `opus` resolve to Sonnet 5.5 and Opus 5.5; other hosts may resolve to older versions. Pin a supported ID if the version matters:
+
+```text
+model:claude:standard claude-sonnet-5-5
+model:claude:strong claude-opus-5-5
+model:custom:frontier vendor/model-id
+lane:custom my-custom-wrapper {modelarg} --goal {goal} {prompt}
+```
+
+Custom templates receive a shell-quoted `{model}` value or an optional `{modelarg}` (`--model <id>`, or no arguments when routing is off). An explicit task or model requires a template that accepts it and, for task routing, a tier mapping. An older wrapper that hard-codes `--model` or picks it itself from `LANE_MODE` keeps its behavior for an implicit class and emits a warning. To migrate, remove the override and use the built-in template, or replace the wrapper's whole fixed or conditional `--model …` pair with `{modelarg}`. If a tool takes a different flag, use its flag with `{model}`.
+
 ## Testing lanes
 
-Run `node --test tests/*.test.mjs` for the startup and goal lifecycle checks. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real TUI against a loopback model endpoint and verify that disabling goals prevents startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
+Run `node --test tests/*.test.mjs` and `bash tests/spawn-hc.sh` for startup, placement, model routing, and goal lifecycle checks. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real TUI against a loopback model endpoint and verify that disabling goals prevents startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
 
 ## License
 

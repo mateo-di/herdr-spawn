@@ -1,6 +1,6 @@
 ---
 name: herdr-spawn
-description: Spawn a coding-agent session (claude, codex, opencode, omp, or any configured launcher) in a sibling Herdr pane, or a lane in its own tab and worktree, with an initial prompt. Use to start a peer session next to me, hand work to a new session, or run parallel workers or lanes. Works from Claude Code, Codex, OpenCode or oh-my-pi; complements the built-in herdr skill.
+description: Spawn a coding-agent session (claude, codex, opencode, omp, or a configured launcher) in a sibling Herdr pane, a root lane in its own tab and worktree, or a subtask pane within that tab. Use to hand work to a new session, route each pane's model, or run parallel workers. Complements the built-in herdr skill.
 ---
 
 # herdr-spawn
@@ -19,6 +19,18 @@ claude  my-claude-wrapper -n {name} {prompt}
 
 Unknown agent: ask the user for its executable and how it takes a name and an initial prompt; with their OK, add a line to the config.
 
+Classify each pane according to its own work, not the root's:
+
+| Pass to `--task` | Pick for |
+|---|---|
+| `mechanical` | Repeatable work with an exact recipe |
+| `simple` | One bounded unit with clear validation |
+| `complex` | Cross-cutting work, architecture, or integration |
+| `exceptional` | Unusually hard or high-stakes judgment |
+| `fact-check` | Independent verification of claims and sources |
+
+Default classes are `complex` for root drivers and `simple` for units/subtasks. `--model <id>` overrides the class, and `--model default` leaves the harness or wrapper in charge. Ordinary launches with no routing flags are unchanged. Tier overrides use `model:<agent>:<small|standard|strong|frontier> <id>`; `exceptional` and `fact-check` both use `frontier`. See the README for default IDs and tips for pinning Sonnet 5.5 or Opus 5.5 rather than relying on host-dependent aliases. Older Claude wrappers that choose their own model from `LANE_MODE` can keep doing so for implicit classes. To use explicit routing, remove the override or replace the entire baked-in `--model …` pair with `{modelarg}`; use `{model}` if a wrapper wants just the quoted value.
+
 The built-in Codex lane verifies native goal startup before reporting success. A `lane:codex` override replaces that check and is responsible for activating the goal; a positional `/goal …` is ordinary Codex prompt text. OpenCode uses a managed goal through the composed brief and lane protocol, not a native goal.
 
 ## Handing over work in progress
@@ -34,16 +46,23 @@ If the child continues work this session started (a run, a plan, an investigatio
 Before spawning the second child on one task, write a lanes doc next to the handoff doc and point every child to it:
 
 - Ownership: the resources only each child may change. Shared resources nobody changes while lanes run go in an "exclusive, later, serial" lane.
-- One writer per shared file: you write shared deliverables; each child writes its own results file and log plus proposed corrections, and you integrate them.
-- Each child reports to you after each block and asks the user in its own pane for anything needing approval. Your approval is never the user's approval.
+- One writer per shared file: serialize overlapping writes, and start dependent panes only when their inputs are ready. You write shared deliverables; each child writes its own results file and log plus proposed corrections, and you integrate them. Do not duplicate work assigned to a visible subtask with an invisible background agent.
+- Each child reports to you after each block and escalates decisions to you. A tool approval dialog is still the user's to answer; your approval is never the user's approval.
 - A status table you alone keep current, one row per child: name, lane mode, pane id, worktree and branch, status (working, blocked, review, done). It is the record you and the user read after a restart or compaction, not the chat.
 
 ## Lanes
 
-A child that changes a repo is a lane: give it its own worktree and branch, created before spawning by the repo's rules, and spawn it into its own tab with `--tab <worktree>` and register it with `--lane <unit|driver> --goal "<objective and its done criterion>"`. The goal is required with `--lane` and refused without it; `spawn.sh` composes the lane's prompt (lane protocol, goal, then your prompt file) and launches it from the `lane:<agent>` template, so the harness holds the lane to the goal. The lane's tab is its own; panes for its tests, servers or a reviewer go there. Every lane's prompt also sets its mode under the preamble, for harnesses without a gate; a lane whose prompt names none is a unit:
+A root lane gets one worktree and branch, created before spawning by the repo's rules, and one new tab:
+
+```bash
+spawn.sh --tab <worktree> --lane <unit|driver> --goal "<objective and done criterion>" [--task <class>] [--model <id|default>] <agent> <name> <prompt-file>
+spawn.sh --subtask-of <root-name-or-id> --goal "<objective and done criterion>" [--task <class>] [--model <id|default>] <agent> <name> <prompt-file>
+```
+
+Use the second form from the original coordinator after the root is ready. It opens a new unit pane in the root lane's tab and workdir, and still reports to you. It cannot be combined with `--tab`, `--lane` or an explicit split. Subtasks cannot be parents. Both forms require `--goal` and use the `lane:<agent>` template and a composed brief (lane protocol, goal, then your prompt file). Set the mode under the preamble for harnesses without a gate; a lane whose prompt names none is a unit:
 
 - `Lane mode: unit` executes one unit you review; it works directly.
-- `Lane mode: driver` owns a whole task: it runs it through `hierarchical-implementation` as the driver, with subagent workers, spawns no further sessions, and reports its integrated, verified result, which you review like a worker's.
+- `Lane mode: driver` owns a whole task and reports its integrated, verified result. Coordinate visible subtasks from the original coordinator; don't have the driver independently delegate their work again.
 
 Pick `driver` when the task has several units; keep a lane to one task so its worktree has one owner.
 
@@ -53,11 +72,14 @@ Pick `driver` when the task has several units; keep a lane to one task so its wo
 herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
 ```
 
-In the Herdr app a lane is an `hc` terminal, your child, shown as a tab in your space (in your tab without `--tab`), with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
+In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. A root opens in a new tab in your space; a subtask uses the root's space/tab labels, without calling the GUI even remotely. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
 
 ### Coordinating lanes
 
 Spawning lanes makes you their coordinator. Your goal is every lane you spawned at `done`, its result verified and integrated; the lanes do the work and you keep them unblocked.
+
+- Before starting panes, split the request into independently verifiable deliverables. Give each deliverable one root lane and put its bounded subtasks in that lane's tab. For each pane, record its scope, dependencies, done criterion, and `--task` class.
+- Tell a root driver which subtasks you will launch, what it owns directly, and which results it must wait for before declaring the whole lane done. Subtask reports come to you; verify and relay the results the driver needs.
 
 Spawning a lane never sets or replaces the coordinator's native goal. In Codex, use `create_goal` for your own thread only when the user explicitly requests it; the user can also use `/goal` in that session.
 
@@ -72,7 +94,7 @@ Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop wh
 
 ## Layout
 
-Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3); `spawn.sh` picks the split. A layout the user asks for goes in as the optional `<pane-id> <right|down>` arguments. Call it once per child; it re-picks each time. In the Herdr app the child joins your tab on the right as your sub-agent, nested under you in the agents list; without `--lane`, a pane id from `herdr-app ls` and a direction split that pane instead, and that child shows on its own in the list. `--tab` opens a new tab in your workspace (in the Herdr app, your space), labelled with the child's name, without taking the user's focus, and does not combine with `<pane-id> <right|down>`. `--lane` combines with either.
+For ordinary launches without `--tab`, the TUI keeps the caller's tab in an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3). In the Herdr app the ordinary child joins your tab as your sub-agent. The optional `<pane-id> <right|down>` arguments explicitly split a pane for an ordinary launch instead. `--tab` opens a new tab in your workspace (in the app, your space), labelled with the child's name, without taking focus. For lanes, use `--tab` for the root and `--subtask-of` to split in that root's tab.
 
 ## Steps
 
@@ -101,7 +123,7 @@ Without `--tab`, the tab stays an even grid (1 → 2 columns → 2×2 → 3×2 �
    <task>
    ```
 
-4. Run `<this skill's directory>/scripts/spawn.sh [--tab <worktree>] [--lane <unit|driver> --goal "<objective>"] <agent> <name> <prompt-file>`. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); on failure it names the pane or terminal, so read it with `herdr pane read` (app: `hc read <terminal>`) and report.
+4. Run `<this skill's directory>/scripts/spawn.sh <agent> <name> <prompt-file>` for an ordinary launch, or use one of the lane forms above. It prints `<pane-id> <name> <agent-kind> <status>` (in the Herdr app, `<terminal> <name> <app> <state>`); if startup fails after opening a pane or terminal, inspect it with `herdr pane read` (app: `hc read <terminal>`) and report.
 5. Confirm the child took the task. Herdr children: read the pane; startup dialogs (Codex hook review, folder trust) can report `idle` or `unknown`, so the printed status alone proves nothing. Claude pair: its first message arrives or `ListAgents` shows the child. A dialog belongs to the user: tell them to answer it in that pane, naming the pane id.
 6. Report agent, pane id and name to the user.
 
