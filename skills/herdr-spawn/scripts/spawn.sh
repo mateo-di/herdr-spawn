@@ -439,7 +439,7 @@ prepare_launch() {
 if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   command -v hc >/dev/null || die "hc (herdr-core) is required"
   if [ $# -eq 3 ]; then
-    if hc get "$name" >/dev/null 2>&1; then die "agent name '$name' is already taken"; fi
+    if [ "$(hc get "$name" --json 2>/dev/null | jq -r '.state')" = live ]; then die "agent name '$name' is already taken"; fi
     # The placement labels live on the caller's core, even when the window runs on another host.
     goal_surface=hc
     if [ -n "$root_ref" ]; then

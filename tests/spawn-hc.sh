@@ -16,6 +16,8 @@ case "$1:$2" in
       '{labels: {"herdr.space": $space, "herdr.tab": $tab}}'
     ;;
   get:t-child) printf '%s\n' '{"status":{"app":"test-agent","state":"idle"}}' ;;
+  get:done-name) printf '%s\n' '{"state":"finished"}' ;;
+  get:live-name) printf '%s\n' '{"state":"live"}' ;;
   get:*) exit 3 ;;
   label:t-child)
     [[ $# -eq 3 && $3 == goal_startup=ready ]]
@@ -127,6 +129,15 @@ assert_rejected() {
 assert_rejected '--lane needs --tab'
 TEST_SPACE='' assert_rejected herdr.space --tab "$tmp/work tree"
 printf '%s\n' 'PASS: missing placement fails before starting any terminal'
+
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" claude done-name "$tmp/prompt")
+[[ $out == 't-child done-name test-agent idle' ]]
+printf '%s\n' 'PASS: a name only a finished terminal holds is reused'
+
+: >"$TEST_ARGS"
+if out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" claude live-name "$tmp/prompt" 2>&1); then exit 1; fi
+[[ $out == *"agent name 'live-name' is already taken"* && ! -s $TEST_ARGS ]]
+printf '%s\n' 'PASS: a name a live terminal holds is refused before starting any terminal'
 
 mkdir -p "$tmp/agent/skills"
 ln -s "$(cd -P -- "$repo/skills/herdr-spawn" && pwd)" "$tmp/agent/skills/herdr-spawn"
