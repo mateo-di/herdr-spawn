@@ -15,7 +15,7 @@ Before opening anything, work out which surface you run in. The user sees a chil
 - herdr TUI: `HERDR_ENV=1`. Children are panes and tabs in your workspace (`HERDR_WORKSPACE_ID`).
 - Neither: you are not in Herdr; say so and stop.
 
-Open every pane and tab through `spawn.sh`, which picks the surface and your space or workspace. Never open them with `herdr tab create`, `herdr pane split`, `herdr-app do tab.new`, `pane.split` or `terminal.open`: from the app, `herdr` commands land in the TUI server, and `tab.new` without `space` lands in whichever space the window shows. If `spawn.sh` cannot do what was asked (a usage error, a missing flag), tell the user instead of improvising. If it warns that this session loaded an older herdr-spawn than the installed one, the skill you are reading is stale: tell the user to start a new session.
+Open every pane and tab through `spawn.sh`, which picks the surface and your space or workspace. Never open them with `herdr tab create`, `herdr pane split`, `herdr-app do tab.new`, `pane.split` or `terminal.open`: from the app, `herdr` commands land in the TUI server, and `tab.new` without `space` lands in whichever space the window shows. If `spawn.sh` cannot do what was asked (a usage error, a missing flag), tell the user instead of improvising. If it warns that this session loaded a herdr-spawn copy other than the installed one, the skill you are reading is stale: tell the user to start a new session.
 
 ## Agents
 
@@ -82,7 +82,7 @@ Pick `driver` when the task has several units; keep a lane to one task so its wo
 herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
 ```
 
-In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. A root opens in a new tab in your space; a subtask uses the root's space/tab labels, without calling the GUI even remotely. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
+In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. A root opens in a new tab in your space, named after it only through `herdr-app` on your host (see Layout); a subtask uses the root's space/tab labels, without calling the GUI even remotely. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
 
 ### Coordinating lanes
 

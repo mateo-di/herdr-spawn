@@ -19,7 +19,9 @@
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it starts the child as an hc terminal of the caller (lane state
 # in hc labels, no watcher), or with <pane-id> <right|down> and no --lane splits that pane through herdr-app, and
-# prints "<terminal> <name> <app> <state>"; see the block below the jq check.
+# prints "<terminal> <name> <app> <state>"; see the block below the jq check. With --tab it then names the new tab
+# after the child through herdr-app, when herdr-app on this host lists that tab.
+# Under Claude Code it warns on stderr when installed_plugins.json records another copy of this plugin as installed.
 # Launch templates come from built-in defaults, overridden or extended by the config file
 # ${HERDR_SPAWN_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-spawn/agents.conf}: one "<agent> <template>" per
 # line; blank lines and full-line # comments are ignored. With --lane the key is `lane:<agent>`. Placeholders,
@@ -139,20 +141,21 @@ statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 scriptdir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
 # A Claude Code session keeps the plugin copy it loaded after an update installs another beside it, so its skill
-# text can describe flags and steps this copy lacks.
+# text can describe flags and steps this copy lacks. This plugin's records are those whose installPath shares
+# this copy's parent (cache/<marketplace>/<plugin>/<version>); a copy outside the cache, such as a clone, has none.
 plugin_root=${adapters%/adapters}
 installed=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json
 if [ -r "$installed" ]; then
-  newer=$(jq -r --arg root "$plugin_root" '
+  recorded=$(jq -r --arg root "$plugin_root" '
     [.plugins[]?[]? | select(.installPath | type == "string")] as $all
     | ($root | sub("/[^/]*$"; "")) as $parent
     | if any($all[]; .installPath == $root) then empty
       else first($all[] | select((.installPath | sub("/[^/]*$"; "")) == $parent) | "\(.version) \(.installPath)")
-      end' "$installed" 2>/dev/null) || newer=
-  if [ -n "$newer" ]; then
+      end' "$installed" 2>/dev/null) || recorded=
+  if [ -n "$recorded" ]; then
     own=$(jq -r '.version // "unknown"' "$plugin_root/.claude-plugin/plugin.json" 2>/dev/null) || own=unknown
-    echo "spawn.sh: warning: running herdr-spawn $own ($plugin_root), but ${newer%% *} is installed (${newer#* });" \
-      "this session loaded the older skill, so ask the user to start a new session to use ${newer%% *}" >&2
+    echo "spawn.sh: warning: running herdr-spawn $own ($plugin_root), but ${recorded%% *} is installed (${recorded#* });" \
+      "this session loaded a skill copy other than the installed one, so ask the user to start a new session to use ${recorded%% *}" >&2
   fi
 fi
 if [ -n "$lane" ]; then
@@ -498,10 +501,13 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
       goal_target=
     fi
     # hc labels carry no tab name, so the window names a label-made tab by its number. Only a window on this
-    # host can rename it; placement already works without one, so naming never fails the spawn.
+    # host can rename it; placement already works without one, so naming never fails the spawn. A hung window must
+    # not hold the spawn once its child runs, so the calls are bounded where `timeout` exists (macOS lacks it).
+    app=(herdr-app)
+    command -v timeout >/dev/null && app=(timeout 5 herdr-app)
     if [ -n "$tabdir" ] && command -v herdr-app >/dev/null &&
-      herdr-app ls 2>/dev/null | jq -e --arg tab "$tab" 'any(.spaces[]?.tabs[]?; .id == $tab)' >/dev/null 2>&1; then
-      herdr-app 'do' tab.rename --id "$tab" --name "$name" >/dev/null 2>&1 ||
+      "${app[@]}" ls 2>/dev/null | jq -e --arg tab "$tab" 'any(.spaces[]?.tabs[]?; .id == $tab)' >/dev/null 2>&1; then
+      "${app[@]}" 'do' tab.rename --id "$tab" --name "$name" >/dev/null 2>&1 ||
         echo "spawn.sh: could not name tab $tab after $name; it keeps its number" >&2
     fi
     echo "$term $name $status"
