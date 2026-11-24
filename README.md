@@ -23,6 +23,8 @@ claude plugin marketplace add mateo-di/herdr-spawn
 claude plugin install herdr-spawn@herdr-spawn
 ```
 
+A Claude Code session started before a plugin update keeps the skill it loaded until it is restarted, so restart open sessions after updating. `spawn.sh` warns on stderr when it runs from an older copy than the one `installed_plugins.json` records, but only versions that contain that check can warn, so the restart is still needed.
+
 Codex:
 
 ```bash
@@ -63,7 +65,7 @@ Upgrading from 1.x: pass `--tab <worktree>` to existing root lane commands. Olde
 
 Classify each pane independently. Run work in parallel only when scopes do not overlap and neither task needs the other's result. Serialize writers to shared files or state, and start dependent panes only when their inputs are ready. Do not assign a visible subtask to an invisible background agent as well.
 
-In the Herdr app, `hc` gives a root lane a new tab ID in the coordinator's space. For subtasks it uses the root's `herdr.space` and `herdr.tab` labels, but still uses the original coordinator as `hc --parent`. No GUI command is needed, even when the window is on another machine. `lane.sh done|escalate` sends the notice straight to the coordinator with `hc send` (tagged `<hc from="tN name">`); `hc` itself notes blocked and exited lanes, a lane that stops without reporting gets a stopped notice from the stop hook, and the stalled notice is TUI-only. In the app, `hc ls` and `hc get <lane>` show lanes and their `lane_*` labels.
+In the Herdr app, `hc` gives a root lane a new tab ID in the coordinator's space. For subtasks it uses the root's `herdr.space` and `herdr.tab` labels, but still uses the original coordinator as `hc --parent`. No GUI command is needed, even when the window is on another machine. `spawn.sh` then names the new tab after the child with `herdr-app` when `herdr-app` on the same host shows that tab; otherwise the tab keeps its number. `lane.sh done|escalate` sends the notice straight to the coordinator with `hc send` (tagged `<hc from="tN name">`); `hc` itself notes blocked and exited lanes, a lane that stops without reporting gets a stopped notice from the stop hook, and the stalled notice is TUI-only. In the app, `hc ls` and `hc get <lane>` show lanes and their `lane_*` labels.
 
 Both `--lane` and `--subtask-of` require a non-blank `--goal`. `spawn.sh` exports `LANE_MODE` and `LANE_COORDINATOR` and writes the lane protocol, goal, and caller's brief to `brief.md` in that launch's private `herdr-spawn/goals/<goal_id>/` state directory. Any generated OpenCode lane config lives there too, so reusing a lane name cannot overwrite either file.
 

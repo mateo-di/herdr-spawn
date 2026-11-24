@@ -138,6 +138,23 @@ statedir=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 # leave from the repo, not from the link's parent.
 scriptdir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 adapters=$(CDPATH='' cd -- "$scriptdir/../../.." && pwd)/adapters
+# A Claude Code session keeps the plugin copy it loaded after an update installs another beside it, so its skill
+# text can describe flags and steps this copy lacks.
+plugin_root=${adapters%/adapters}
+installed=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/installed_plugins.json
+if [ -r "$installed" ]; then
+  newer=$(jq -r --arg root "$plugin_root" '
+    [.plugins[]?[]? | select(.installPath | type == "string")] as $all
+    | ($root | sub("/[^/]*$"; "")) as $parent
+    | if any($all[]; .installPath == $root) then empty
+      else first($all[] | select((.installPath | sub("/[^/]*$"; "")) == $parent) | "\(.version) \(.installPath)")
+      end' "$installed" 2>/dev/null) || newer=
+  if [ -n "$newer" ]; then
+    own=$(jq -r '.version // "unknown"' "$plugin_root/.claude-plugin/plugin.json" 2>/dev/null) || own=unknown
+    echo "spawn.sh: warning: running herdr-spawn $own ($plugin_root), but ${newer%% *} is installed (${newer#* });" \
+      "this session loaded the older skill, so ask the user to start a new session to use ${newer%% *}" >&2
+  fi
+fi
 if [ -n "$lane" ]; then
   callerprompt=$promptfile
   key=lane:$agent
@@ -479,6 +496,13 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
     if [ -n "$goal_target" ]; then
       report_goal_startup ready || die "could not record goal startup on terminal $term, left open"
       goal_target=
+    fi
+    # hc labels carry no tab name, so the window names a label-made tab by its number. Only a window on this
+    # host can rename it; placement already works without one, so naming never fails the spawn.
+    if [ -n "$tabdir" ] && command -v herdr-app >/dev/null &&
+      herdr-app ls 2>/dev/null | jq -e --arg tab "$tab" 'any(.spaces[]?.tabs[]?; .id == $tab)' >/dev/null 2>&1; then
+      herdr-app 'do' tab.rename --id "$tab" --name "$name" >/dev/null 2>&1 ||
+        echo "spawn.sh: could not name tab $tab after $name; it keeps its number" >&2
     fi
     echo "$term $name $status"
     exit 0
