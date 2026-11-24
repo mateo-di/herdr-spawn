@@ -30,6 +30,30 @@ esac
 SH
 cat >"$tmp/bin/herdr-app" <<'SH'
 #!/usr/bin/env bash
+set -eu
+printf '%s\n' "$@" >>"$TEST_UI"
+printf '%s\n' '--' >>"$TEST_UI"
+case ${1:-} in
+  ls)
+    tab=$(sed -n 's/^herdr\.tab=//p' "$TEST_ARGS")
+    if [ "$TEST_UI_SHOWS_TAB" = 1 ]; then
+      jq -nc --arg tab "$tab" '{spaces: [{id: "sp-parent", tabs: [{id: $tab}]}]}'
+    else
+      jq -nc '{spaces: [{id: "sp-parent", tabs: []}]}'
+    fi
+    exit 0
+    ;;
+  do)
+    if [ "${2:-}" = tab.rename ]; then
+      if [ "$TEST_RENAME_FAIL" = 1 ]; then
+        printf '%s\n' '{"error":"test"}'
+        exit 1
+      fi
+      printf '%s\n' '{"ok":true}'
+      exit 0
+    fi
+    ;;
+esac
 printf '%s\n' 'Unexpected call to the UI' >&2
 exit 99
 SH
@@ -37,8 +61,10 @@ chmod +x "$tmp/bin/hc" "$tmp/bin/herdr-app"
 
 export PATH="$tmp/bin:$PATH" HERDR_ENV=0 HC_TERMINAL_ID=t-parent
 export TEST_SPACE=sp-parent TEST_TAB=tb-parent TEST_ARGS="$tmp/args"
-export TEST_LABEL="$tmp/label"
+export TEST_LABEL="$tmp/label" TEST_UI="$tmp/ui" TEST_UI_SHOWS_TAB=1 TEST_RENAME_FAIL=0
 export HERDR_SPAWN_CONFIG="$tmp/no-config" XDG_STATE_HOME="$tmp/state"
+export CLAUDE_CONFIG_DIR="$tmp/claude"
+: >"$TEST_UI"
 
 spawn() {
   bash "$repo/skills/herdr-spawn/scripts/spawn.sh" "$@" \
@@ -112,3 +138,70 @@ plugin=$(jq -er 'select(has("model") | not) | .plugins[0]' "$XDG_STATE_HOME/herd
 [[ $plugin == "file://$(cd -P -- "$repo" && pwd)/adapters/opencode/herdr-lanes" ]]
 if grep -Fq -- OPENCODE_CONFIG_CONTENT "$TEST_ARGS"; then exit 1; fi
 printf '%s\n' 'PASS: a symlinked skill directory still finds the repo adapters'
+
+export TEST_UI_SHOWS_TAB=1 TEST_RENAME_FAIL=0
+: >"$TEST_UI"
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" claude ui-none "$tmp/prompt")
+[[ $out == 't-child ui-none test-agent idle' ]]
+[[ ! -s $TEST_UI ]]
+printf '%s\n' 'PASS: an ordinary app launch never calls the UI to name the tab'
+
+: >"$TEST_UI"
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --tab "$tmp/work tree" claude ui-tab "$tmp/prompt")
+[[ $out == 't-child ui-tab test-agent idle' ]]
+tab=$(sed -n 's/^herdr\.tab=//p' "$TEST_ARGS")
+[[ -n $tab ]]
+awk 'seen { print } $0 == "--" { seen = 1 }' "$TEST_UI" >"$tmp/rename-calls"
+printf '%s\n' 'do' tab.rename --id "$tab" --name ui-tab -- >"$tmp/expected-rename"
+diff -u "$tmp/expected-rename" "$tmp/rename-calls"
+printf '%s\n' 'PASS: a new app tab is renamed after the child with herdr-app'
+
+export TEST_UI_SHOWS_TAB=0 TEST_RENAME_FAIL=0
+: >"$TEST_UI"
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --tab "$tmp/work tree" claude ui-tab "$tmp/prompt")
+[[ $out == 't-child ui-tab test-agent idle' ]]
+grep -Fxq 'ls' "$TEST_UI"
+if grep -Fq 'tab.rename' "$TEST_UI"; then exit 1; fi
+printf '%s\n' 'PASS: a tab the UI does not list keeps its number'
+
+export TEST_UI_SHOWS_TAB=1 TEST_RENAME_FAIL=1
+: >"$TEST_UI"
+err="$tmp/err"
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --tab "$tmp/work tree" claude ui-tab "$tmp/prompt" 2>"$err")
+[[ $out == 't-child ui-tab test-agent idle' ]]
+grep -Fq 'could not name tab' "$err"
+printf '%s\n' 'PASS: a failed tab rename warns but leaves the spawn successful'
+
+export TEST_UI_SHOWS_TAB=1 TEST_RENAME_FAIL=0
+cache_dir="$tmp/claude/plugins/cache/hs/herdr-spawn/1.0.0"
+mkdir -p "$cache_dir"
+cp -R "$repo/.claude-plugin" "$repo/skills" "$repo/adapters" "$cache_dir/"
+cache=$(cd -P -- "$tmp/claude/plugins/cache/hs/herdr-spawn" && pwd)
+jq -n --arg path "$cache/9.9.9" \
+  '{version: 2, plugins: {"herdr-spawn@hs": [{scope: "user", installPath: $path, version: "9.9.9"}]}}' \
+  >"$tmp/claude/plugins/installed_plugins.json"
+err="$tmp/err"
+out=$(bash "$cache_dir/skills/herdr-spawn/scripts/spawn.sh" claude stale-old "$tmp/prompt" 2>"$err")
+[[ $out == 't-child stale-old test-agent idle' ]]
+grep -Fq 'warning: running herdr-spawn' "$err"
+grep -Fq 'but 9.9.9 is installed' "$err"
+grep -Fq 'start a new session' "$err"
+printf '%s\n' 'PASS: an older copy warns when a newer plugin is installed'
+
+jq -n --arg path "$cache/1.0.0" \
+  '{version: 2, plugins: {"herdr-spawn@hs": [{scope: "user", installPath: $path, version: "9.9.9"}]}}' \
+  >"$tmp/claude/plugins/installed_plugins.json"
+err="$tmp/err"
+out=$(bash "$cache_dir/skills/herdr-spawn/scripts/spawn.sh" claude stale-current "$tmp/prompt" 2>"$err")
+[[ $out == 't-child stale-current test-agent idle' ]]
+if grep -Fq 'warning: running herdr-spawn' "$err"; then exit 1; fi
+printf '%s\n' 'PASS: a copy matching the installed plugin root does not warn'
+
+jq -n --arg path "$cache/9.9.9" \
+  '{version: 2, plugins: {"herdr-spawn@hs": [{scope: "user", installPath: $path, version: "9.9.9"}]}}' \
+  >"$tmp/claude/plugins/installed_plugins.json"
+err="$tmp/err"
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" claude stale-repo "$tmp/prompt" 2>"$err")
+[[ $out == 't-child stale-repo test-agent idle' ]]
+if grep -Fq 'warning: running herdr-spawn' "$err"; then exit 1; fi
+printf '%s\n' 'PASS: an unrelated plugin root does not warn about another install'

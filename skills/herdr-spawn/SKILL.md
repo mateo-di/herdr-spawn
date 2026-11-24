@@ -7,6 +7,16 @@ description: Spawn a coding-agent session (claude, codex, opencode, omp, or a co
 
 Spawns a child agent in a new pane split from this one, or with `--tab` in a new tab, and hands it a prompt file. For prompting, waiting, reading, dialogs and closing panes, follow the built-in `herdr` skill; if it isn't loaded, run `herdr --skill` and read it. In the Herdr app (`HC_TERMINAL_ID` set, no `HERDR_ENV`), use herdr-core instead: `hc send`, `hc wait` and `hc read` with the child's terminal, and `hc --skill` for the rest.
 
+## Where you are
+
+Before opening anything, work out which surface you run in. The user sees a child only on that surface, in your own space or workspace.
+
+- Herdr app: `HC_TERMINAL_ID` is set and `HERDR_ENV` is not `1`. Children are `hc` terminals in your space. The `herdr` CLI still answers here, but it drives the separate herdr TUI server, which the user in the app does not see.
+- herdr TUI: `HERDR_ENV=1`. Children are panes and tabs in your workspace (`HERDR_WORKSPACE_ID`).
+- Neither: you are not in Herdr; say so and stop.
+
+Open every pane and tab through `spawn.sh`, which picks the surface and your space or workspace. Never open them with `herdr tab create`, `herdr pane split`, `herdr-app do tab.new`, `pane.split` or `terminal.open`: from the app, `herdr` commands land in the TUI server, and `tab.new` without `space` lands in whichever space the window shows. If `spawn.sh` cannot do what was asked (a usage error, a missing flag), tell the user instead of improvising. If it warns that this session loaded a herdr-spawn copy other than the installed one, the skill you are reading is stale: tell the user to start a new session.
+
 ## Agents
 
 `scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
@@ -72,7 +82,7 @@ Pick `driver` when the task has several units; keep a lane to one task so its wo
 herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
 ```
 
-In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. A root opens in a new tab in your space; a subtask uses the root's space/tab labels, without calling the GUI even remotely. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
+In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. A root opens in a new tab in your space, named after it only through `herdr-app` on your host (see Layout); a subtask uses the root's space/tab labels, without calling the GUI even remotely. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
 
 ### Coordinating lanes
 
@@ -94,11 +104,11 @@ Each harness's stop hook runs `scripts/lane-stop-check.sh`: a lane can't stop wh
 
 ## Layout
 
-For ordinary launches without `--tab`, the TUI keeps the caller's tab in an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3). In the Herdr app the ordinary child joins your tab as your sub-agent. The optional `<pane-id> <right|down>` arguments explicitly split a pane for an ordinary launch instead. `--tab` opens a new tab in your workspace (in the app, your space), labelled with the child's name, without taking focus. For lanes, use `--tab` for the root and `--subtask-of` to split in that root's tab.
+For ordinary launches without `--tab`, the TUI keeps the caller's tab in an even grid (1 → 2 columns → 2×2 → 3×2 → 3×3). In the Herdr app the ordinary child joins your tab as your sub-agent. The optional `<pane-id> <right|down>` arguments explicitly split a pane for an ordinary launch instead. `--tab` opens a new tab in your workspace (in the app, your space), labelled with the child's name, without taking focus. In the app the name needs `herdr-app` on your host showing that tab; otherwise the tab keeps its number. For lanes, use `--tab` for the root and `--subtask-of` to split in that root's tab.
 
 ## Steps
 
-1. Pick the agent and a child name (example `review-pr-123`). In the herdr TUI, `spawn.sh` rejects a name taken by a live Herdr agent.
+1. Check where you are (above). Pick the agent and a child name (example `review-pr-123`). In the herdr TUI, `spawn.sh` rejects a name taken by a live Herdr agent.
 2. Claude caller with a `claude` child: call `ListAgents`, read the first line `This session is <parent-name> [...]`, and check the child name is absent from the rows (messaging names are a separate namespace).
 3. Write the prompt file with your file-writing tool: the harness scratchpad if it has one, else `/tmp/herdr-spawn/<name>.md`. Content is a preamble plus the task (the handoff doc pointer for a handover, plus the lanes doc for parallel children).
 
