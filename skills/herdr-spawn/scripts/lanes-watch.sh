@@ -13,6 +13,7 @@
 #             completion_seq counter not rising); once per stretch.
 #   blocked   a lane entered blocked (first seen blocked included).
 #   exited    a lane's pane vanished.
+#   lost      a lane's name and lane tokens vanished but its pane is still open (a Herdr restart); restore it.
 # The last snapshot, with the stall and idle bookkeeping, persists per coordinator, so a restarted watcher does not
 # re-announce what it reported.
 # Notices queue in the state dir and are posted to the coordinator with `herdr agent prompt` only while it is
@@ -79,7 +80,7 @@ track() {
 # Reads the previous and current (tracked) snapshots; prints "<kind> <name> <pane> <report or -> <notice>",
 # tab-separated, per transition.
 events() {
-  jq -nr --argjson prev "$1" --argjson cur "$2" --argjson stall "$stall" --arg lanesh "$lanesh" '
+  jq -nr --argjson prev "$1" --argjson cur "$2" --argjson open "$3" --argjson stall "$stall" --arg lanesh "$lanesh" '
     def where: "(\(.agent), pane \(.pane_id), mode \(.mode // "unit"))";
     def read: "herdr agent read \(.name) --source recent-unwrapped --lines 120";
     def row($kind; $text): [$kind, .name, .pane_id, (.report // "-"), $text] | join("\t");
@@ -102,12 +103,16 @@ events() {
             row("stalled"; "[lane \(.name)] working for \(($stall / 60) | floor) min without finishing a turn \(where). Check it: \(read)")
           else empty end)),
       ($prev[] | select(.pane_id as $id | $alive | index($id) | not)
-       | row("exited"; "[lane \(.name)] exited \(where)."))'
+       | if (.pane_id as $id | $open | index($id)) then
+           row("lost"; "[lane \(.name)] lost its name and lane tokens, but pane \(.pane_id) is still open (a Herdr restart does this). Restore it with: \($lanesh) restore")
+         else
+           row("exited"; "[lane \(.name)] exited \(where).")
+         end)'
 }
 
 # Queue lines are "<kind> <pane> <report> <text>", tab-separated. Prints the texts still worth sending, joined,
 # judged against the current snapshot: an escalation is stale once its lane is no longer escalated under that
-# report, a stopped or stalled lane once it is working again.
+# report, a stopped or stalled lane once it is working again, a lost lane once its pane is back in the snapshot.
 fresh_text() {
   jq -nrR --argjson cur "$prev" '
     [inputs | split("\t") as $f
@@ -115,6 +120,7 @@ fresh_text() {
      | select(if $f[0] == "escalation" then $l != null and $l.state == "escalated" and $l.report == $f[2]
               elif $f[0] == "stopped" then $l != null and $l.state == "working" and ($l.agent_status | IN("idle", "done"))
               elif $f[0] == "stalled" then $l != null and $l.state == "working"
+              elif $f[0] == "lost" then $l == null
               else true end)
      | $f[3:] | join("\t")] | join(" | ")' <"$queue"
 }
@@ -156,6 +162,13 @@ while :; do
       [.result.agents[] | select(.tokens.lane_of == $c)
        | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode, state: .tokens.lane_state, note: .tokens.lane_note, report: .tokens.lane_report}]') &&
      [ -n "$cur" ] && cur=$(track "$prev" "$cur" "$(date +%s)"); then
+    # A lane missing from the snapshot may only have lost its tokens in a Herdr restart; ask herdr which panes
+    # are still open before deciding it exited. Only one call per snapshot, and only when it could matter.
+    open='[]'
+    if jq -ne --argjson prev "$prev" --argjson cur "$cur" '
+        ($cur | map(.pane_id)) as $alive | any($prev[]; .pane_id as $id | $alive | index($id) | not)' >/dev/null; then
+      open=$(herdr pane list 2>/dev/null | jq -c '[.result.panes[].pane_id]') || open='[]'
+    fi
     while IFS=$'\t' read -r kind name pane report notice; do
       [ -n "$kind" ] || continue
       printf '%s\t%s\t%s\t%s\n' "$kind" "$pane" "$report" "$notice" >>"$queue"
@@ -163,7 +176,7 @@ while :; do
       if [ "$kind" = blocked ]; then
         herdr notification show "Lane $name needs input" --body "$notice" --sound request >/dev/null 2>&1 || true
       fi
-    done < <(events "$prev" "$cur")
+    done < <(events "$prev" "$cur" "$open")
     prev=$cur
     printf '%s\n' "$cur" >"$seen"
     deliver
