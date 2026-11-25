@@ -78,6 +78,7 @@ switch (basename(process.argv[1])) {
       }
       case 'send':
         if (process.env.GOAL_FAIL === '1') no();
+        fs.appendFileSync(process.env.GOAL_MOCK_SENT, JSON.stringify({ to: b, msg: args[3] }) + '\\n');
         break;
       default: assert.fail(a);
     }
@@ -158,6 +159,7 @@ for (const surface of ['herdr', 'hc']) {
       HERDR_ENV: surface === 'herdr' ? '1' : '', HERDR_PANE_ID: 'parent', HC_TERMINAL_ID: 'parent',
       HC_SOCKET: 'mock-socket', HC_SESSION: 'mock-session',
       HERDR_SPAWN_CONFIG: conf, XDG_STATE_HOME: state, SHELL: '/bin/bash', OPENCODE_CONFIG_CONTENT: '',
+      HERDR_SPAWN_REPORT_DIR: join(root, 'reports'), GOAL_MOCK_SENT: join(root, 'sent'),
     };
     const invoke = (script, args, extra = {}) =>
       run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
@@ -199,16 +201,63 @@ for (const surface of ['herdr', 'hc']) {
     assert.ok(!before.includes('Exact'), 'objective must not be in terminal metadata');
 
     const inside = { HERDR_PANE_ID: id, HC_TERMINAL_ID: id, LANE_COORDINATOR: 'parent', LANE_MODE: 'unit' };
-    await lane(['escalate', 'a question'], inside);
+    const reportDir = join(root, 'reports');
+    const reportFile = join(root, 'report.md');
+    const questionFile = join(root, 'question.md');
+    const sentFile = join(root, 'sent');
+    await writeFile(sentFile, '');
+    await writeFile(reportFile, 'The lane finished its unit.');
+    await writeFile(questionFile, 'Should the coordinator decide?');
+    const sent = async () => (await readFile(sentFile, 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l));
+    await lane(['escalate', 'a question', questionFile], inside);
+    if (surface === 'hc') {
+      const asked = (await rows())[id].labels.lane_report;
+      assert.ok(asked.startsWith(reportDir), asked);
+      assert.equal(await readFile(asked, 'utf8'), 'Should the coordinator decide?');
+      const sentList = await sent();
+      assert.ok(sentList.at(-1).msg.includes(`Read the full question: ${asked}; answer with:`), sentList.at(-1).msg);
+    }
     assert.equal((await goal(id)).goal_status, 'escalated');
     await assert.rejects(lane(['reply', 'managed', 'no delivery'], { GOAL_FAIL: '1' }), /state is unchanged/);
     assert.equal((await goal(id)).goal_status, 'escalated');
     await lane(['reply', 'managed', 'an answer']);
     assert.equal((await goal(id)).goal_status, 'active');
-    await lane(['done', 'done'], inside);
+    await lane(['done', 'done', reportFile], inside);
     assert.equal((await goal(id)).goal_status, 'done');
+    const row = await rows();
+    const laneReport = surface === 'herdr' ? row[id].sources['herdr-spawn'].lane_report : row[id].labels.lane_report;
+    assert.ok(laneReport.startsWith('/'), laneReport);
+    assert.ok(laneReport.startsWith(reportDir), laneReport);
+    const copyStat = await stat(laneReport);
+    assert.equal(copyStat.mode & 0o777, 0o600);
+    assert.equal(await readFile(laneReport, 'utf8'), 'The lane finished its unit.');
+    if (surface === 'hc') {
+      const sentList = await sent();
+      assert.ok(sentList.at(-1).msg.includes(`Read its report: ${laneReport}`), sentList.at(-1).msg);
+    }
     await lane(['working'], inside);
     assert.deepEqual(await goal(id), original);
+
+    // A refused report sets no token or label and sends no notice.
+    const beforeRefusals = await readFile(db, 'utf8');
+    const sentBefore = await readFile(sentFile, 'utf8');
+    await assert.rejects(lane(['done', 'a summary', join(root, 'missing.md')], inside), /report file is not a readable regular file/);
+    await writeFile(join(root, 'empty.md'), '');
+    await assert.rejects(lane(['done', 'a summary', join(root, 'empty.md')], inside), /report file is empty/);
+    await mkdir(join(root, 'adir'));
+    await assert.rejects(lane(['done', 'a summary', join(root, 'adir')], inside), /report file is not a readable regular file/);
+    await writeFile(join(root, 'big.md'), 'x'.repeat(262145));
+    await assert.rejects(lane(['done', 'a summary', join(root, 'big.md')], inside), /report file is larger than 262144 bytes/);
+    const linkDir = join(root, 'reports-link');
+    await mkdir(join(root, 'reports-real'), { mode: 0o700 });
+    await symlink(join(root, 'reports-real'), linkDir);
+    await assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: linkDir }), /not private/);
+    const wideDir = join(root, 'reports-wide');
+    await mkdir(wideDir);
+    await chmod(wideDir, 0o755);
+    await assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: wideDir }), /not private/);
+    assert.equal(await readFile(db, 'utf8'), beforeRefusals);
+    assert.equal(await readFile(sentFile, 'utf8'), sentBefore);
 
     await spawnLane('claude', 'native');
     const native = await goal('native');
