@@ -44,7 +44,7 @@ async function fixture(t) {
   delete env.LANE_COORDINATOR;
   const runCheck = extra => run('bash', [script], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
   const setDb = async value => writeFile(db, JSON.stringify(value));
-  return { root, state, setDb, runCheck };
+  return { root, state, env, setDb, runCheck };
 }
 
 test('lane-stop-check treats a TUI pane with a lane_mode token as a lane', async t => {
@@ -74,4 +74,21 @@ test('lane-stop-check ignores a TUI pane without lane_of or with an unknown lane
   assert.equal((await f.runCheck()).stdout, '');
   await f.setDb({ pane: { lane_mode: 'unit', lane_state: 'working' }, agents: [] });
   assert.equal((await f.runCheck()).stdout, '');
+  for (const lane_of of ['-', '.x']) {
+    await f.setDb({ pane: { lane_of, lane_mode: 'unit', lane_state: 'working' }, agents: [] });
+    assert.equal((await f.runCheck()).stdout, '');
+  }
+});
+
+test('lane-stop.sh lets a restored lane stop while background work runs, and blocks it otherwise', async t => {
+  const f = await fixture(t);
+  await f.setDb({ pane: { lane_of: 'w1:p1', lane_mode: 'unit', lane_state: 'working' }, agents: [] });
+  const hook = fileURLToPath(new URL('../hooks/lane-stop.sh', import.meta.url));
+  const stop = input => new Promise((resolve, reject) => {
+    const p = execFile('bash', [hook], { cwd: f.root, env: f.env, timeout: 10_000 },
+      (e, stdout) => e ? reject(e) : resolve(stdout));
+    p.stdin.end(input);
+  });
+  assert.equal(await stop('{"session_id":"s1","background_tasks":[{"type":"shell","status":"running"}]}'), '');
+  assert.equal(JSON.parse(await stop('{"session_id":"s1","background_tasks":[]}')).decision, 'block');
 });

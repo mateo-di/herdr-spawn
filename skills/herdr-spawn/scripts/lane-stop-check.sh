@@ -37,7 +37,8 @@ if [ -z "$lane" ] && [ "$app" = 0 ]; then
   # A Herdr restart drops the lane's LANE_MODE export; lane.sh restore puts its lane_mode token back. Any pane can
   # set tokens, so only a lane's own pair counts: a lane_of and a lane_mode that spawn.sh could have written.
   lane=$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.tokens
-    | select((.lane_of // "") != "" and (.lane_mode == "unit" or .lane_mode == "driver")) | .lane_mode') || lane=''
+    | select((.lane_of // "" | test("^[A-Za-z0-9][A-Za-z0-9_:.-]*$")) and (.lane_mode == "unit" or .lane_mode == "driver"))
+    | .lane_mode') || lane=''
 fi
 if [ -n "$lane" ]; then
   if [ "$app" = 1 ]; then

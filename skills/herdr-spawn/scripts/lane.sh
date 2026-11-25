@@ -50,7 +50,7 @@ start_watcher() { # <coordinator>
 
 # Re-apply a recorded lane's name and tokens to its surviving pane, using one `herdr agent list` snapshot.
 restore_one() { # <lane.json> <agents-json>
-  local record_file=$1 agents=$2 dir record name session count pane holder goal_mode of mode
+  local record_file=$1 agents=$2 dir record recorded_pane name session count pane holder goal_mode of mode
   dir=${record_file%/*}
   # A lane record is a private, write-once file in a private goal directory.
   [[ ${dir##*/} =~ ^g\.[[:alnum:]]{12}$ ]] || return 0
@@ -68,7 +68,9 @@ restore_one() { # <lane.json> <agents-json>
   fi
   name=$(jq -r '.name' <<<"$record")
   of=$(jq -r '.lane_of' <<<"$record")
-  if jq -e --arg name "$name" --arg of "$of" 'any(.result.agents[]?; .name == $name and .tokens.lane_of == $of)' <<<"$agents" >/dev/null; then
+  recorded_pane=$(jq -r '.pane // empty' <<<"$record")
+  if jq -e --arg name "$name" --arg of "$of" --arg rp "$recorded_pane" \
+    'any(.result.agents[]?; .name == $name and .tokens.lane_of == $of and .pane_id == $rp)' <<<"$agents" >/dev/null; then
     echo "$name: present"
     touched=1
     return 0
@@ -98,11 +100,16 @@ restore_one() { # <lane.json> <agents-json>
   mode=$(jq -r '.lane_mode' <<<"$record")
   # A half-restored pane that kept its name only lost its tokens; renaming it to itself would be a needless call.
   if [ "$(jq -r --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p) | .name // ""][0] // ""' <<<"$agents")" != "$name" ]; then
-    herdr agent rename "$pane" "$name" >/dev/null || die "could not rename $pane to $name"
+    if ! herdr agent rename "$pane" "$name" >/dev/null; then
+      echo "$name: cannot restore, rename failed"
+      return 0
+    fi
   fi
-  herdr pane report-metadata "$pane" --source herdr-spawn-goal --token "goal_id=${dir##*/}" \
-    --token "goal_mode=$goal_mode" --token goal_startup=ready >/dev/null ||
-    die "could not record goal metadata on $pane"
+  if ! herdr pane report-metadata "$pane" --source herdr-spawn-goal --token "goal_id=${dir##*/}" \
+    --token "goal_mode=$goal_mode" --token goal_startup=ready >/dev/null; then
+    echo "$name: cannot restore, could not record goal metadata"
+    return 0
+  fi
   set_state "$pane" "$of" "$mode" working
   echo "$name: restored on $pane"
   touched=1

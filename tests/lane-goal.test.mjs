@@ -133,7 +133,7 @@ switch (basename(process.argv[1])) {
         save();
         break;
       case 'agent rename':
-        if (process.env.GOAL_FAIL === 'rename') no();
+        if (process.env.GOAL_FAIL === 'rename' || process.env.RENAME_FAIL_PANE === c) no();
         (find(c) ?? no()).name = args[3];
         save();
         break;
@@ -400,7 +400,7 @@ for (const surface of ['herdr', 'hc']) {
 
 async function restoreFixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'herdr-lane-restore-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5 }));
   const db = join(root, 'db');
   const brief = join(root, 'brief');
   const state = join(root, 'state');
@@ -612,7 +612,7 @@ test('in-lane done fails without tokens or a lane record', async t => {
 });
 
 test('in-lane done rejects pane tokens that do not name a coordinator and mode', async t => {
-  for (const tokens of [{ lane_mode: 'unit' }, { lane_of: 'w1:p1', lane_mode: 'x' }]) {
+  for (const tokens of [{ lane_mode: 'unit' }, { lane_of: '-', lane_mode: 'unit' }, { lane_of: 'w1:p1', lane_mode: 'x' }]) {
     const f = await restoreFixture(t);
     const id = f.idOf((await f.spawn('managed')).stdout);
     const file = await f.recordFile(id);
@@ -670,6 +670,62 @@ test('in-lane self-restore reports a name another pane holds', async t => {
   assert.deepEqual(after[x].sources, {});
   await f.pause();
   assert.equal(await f.watch(), '');
+});
+
+test('lane.sh restore does not treat a same-coordinator lane on another pane as present', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  all[y].sources['herdr-spawn'] = { lane_of: 'parent', lane_mode: 'unit' };
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, pane ${y} holds the name`));
+  assert.doesNotMatch(stdout, /present/);
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+});
+
+test('in-lane self-restore reports a same-coordinator lane on another pane holding the name', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  all[y].sources['herdr-spawn'] = { lane_of: 'parent', lane_mode: 'unit' };
+  await f.setRows(all);
+  await assert.rejects(f.invoke('lane.sh', ['done', 'nothing'],
+    { HERDR_PANE_ID: x, LANE_COORDINATOR: '', LANE_MODE: '' }), err => {
+    assert.match(err.stdout, new RegExp(`pane ${y} holds the name`));
+    return true;
+  });
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+});
+
+test('lane.sh restore carries on after one lane fails to rename', async t => {
+  const f = await restoreFixture(t);
+  const a = f.idOf((await f.spawn('managed')).stdout);
+  const b = f.idOf((await f.spawn('second')).stdout);
+  await f.forget(a);
+  await f.forget(b);
+  const { stdout } = await f.invoke('lane.sh', ['restore'], { RENAME_FAIL_PANE: a });
+  assert.match(stdout, /managed: cannot restore, rename failed/);
+  assert.match(stdout, new RegExp(`second: restored on ${b}`));
+  const after = await f.rows();
+  assert.equal(after[a].name, undefined);
+  assert.deepEqual(after[a].sources, {});
+  assert.equal(after[b].name, 'second');
 });
 
 test('lane.sh restore says when goal.json has no goal_mode', async t => {
