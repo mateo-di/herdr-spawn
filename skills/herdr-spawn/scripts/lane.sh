@@ -37,16 +37,19 @@ report=$stamp
 # made on every call (age-based /tmp cleaning removes it) and must be ours, a real directory and mode 0700.
 store_report() { # <file>
   local src=$1 dir=${HERDR_SPAWN_REPORT_DIR:-/tmp/herdr-spawn-reports-$(id -u)} path size
+  # ASCII only and absolute: the path rides in tab- and space-split fields and herdr's 79 cap counts bytes.
+  [[ $dir =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+    die "HERDR_SPAWN_REPORT_DIR must be an absolute path of letters, digits and . _ - /: $dir"
   [ -f "$src" ] && [ -r "$src" ] || die "report file is not a readable regular file: $src"
   [ -s "$src" ] || die "report file is empty: $src"
   size=$(wc -c <"$src") || die "could not read the report file: $src"
   size=$(printf '%s' "$size" | tr -d '[:space:]')
   [ "$size" -le 262144 ] || die "report file is larger than 262144 bytes: $src"
   # shellcheck disable=SC2174 # only the deepest directory is ours; the check below rejects a wrong mode
-  [ -L "$dir" ] || mkdir -p -m 700 "$dir" 2>/dev/null || die "could not create the report directory $dir"
+  [ -L "$dir" ] || mkdir -p -m 700 "$dir" 2>/dev/null || die "could not create the report directory $dir; set HERDR_SPAWN_REPORT_DIR to an absolute directory you can write, such as one under your TMPDIR"
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] &&
     [ -n "$(find "$dir" -prune -perm 0700 -print)" ] ||
-    die "the report directory $dir is not private; it must be a real directory owned by you with mode 0700"
+    die "the report directory $dir is not private; it must be a real directory owned by you with mode 0700; set HERDR_SPAWN_REPORT_DIR to another directory"
   path=$dir/$stamp.md
   [ ${#path} -le 79 ] ||
     die "the report path is ${#path} characters and herdr cuts token values at 79; set HERDR_SPAWN_REPORT_DIR to a shorter directory"
@@ -190,6 +193,7 @@ if [ "$app" = 1 ]; then
       "lane_note=$(jq -r '.labels.lane_note // ""' <<<"$info")" >/dev/null || true
     die "the coordinator $LANE_COORDINATOR did not take the notice (blocked or gone?); lane_state is unchanged, run lane.sh $cmd again"
   fi
+  printf 'lane.sh: stored the report at %s\n' "$report"
   exit 0
 fi
 
@@ -206,3 +210,4 @@ case $cmd in
   "done") set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" "done" --token "lane_note=$(note "$2")" ;;
   escalate) set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" escalated --token "lane_note=$(note "$2")" ;;
 esac
+if [ "$cmd" != working ]; then printf 'lane.sh: stored the report at %s\n' "$report"; fi

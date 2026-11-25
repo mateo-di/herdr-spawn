@@ -136,6 +136,9 @@ for (const surface of ['herdr', 'hc']) {
   test(`goal manifests and lifecycle over ${surface}`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'herdr-lane-goal-'));
     t.after(() => rm(root, { recursive: true, force: true }));
+    // A short fixed prefix keeps the stored path under herdr's 79-character cap whatever tmpdir() is.
+    const reportDir = await mkdtemp('/tmp/hsr-');
+    t.after(() => rm(reportDir, { recursive: true, force: true }));
     const db = join(root, 'db');
     const brief = join(root, 'brief');
     const conf = join(root, 'agents.conf');
@@ -159,7 +162,7 @@ for (const surface of ['herdr', 'hc']) {
       HERDR_ENV: surface === 'herdr' ? '1' : '', HERDR_PANE_ID: 'parent', HC_TERMINAL_ID: 'parent',
       HC_SOCKET: 'mock-socket', HC_SESSION: 'mock-session',
       HERDR_SPAWN_CONFIG: conf, XDG_STATE_HOME: state, SHELL: '/bin/bash', OPENCODE_CONFIG_CONTENT: '',
-      HERDR_SPAWN_REPORT_DIR: join(root, 'reports'), GOAL_MOCK_SENT: join(root, 'sent'),
+      HERDR_SPAWN_REPORT_DIR: reportDir, GOAL_MOCK_SENT: join(root, 'sent'),
     };
     const invoke = (script, args, extra = {}) =>
       run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
@@ -201,7 +204,10 @@ for (const surface of ['herdr', 'hc']) {
     assert.ok(!before.includes('Exact'), 'objective must not be in terminal metadata');
 
     const inside = { HERDR_PANE_ID: id, HC_TERMINAL_ID: id, LANE_COORDINATOR: 'parent', LANE_MODE: 'unit' };
-    const reportDir = join(root, 'reports');
+    const token = async () => {
+      const r = (await rows())[id];
+      return surface === 'herdr' ? r.sources['herdr-spawn'].lane_report : r.labels.lane_report;
+    };
     const reportFile = join(root, 'report.md');
     const questionFile = join(root, 'question.md');
     const sentFile = join(root, 'sent');
@@ -210,10 +216,10 @@ for (const surface of ['herdr', 'hc']) {
     await writeFile(questionFile, 'Should the coordinator decide?');
     const sent = async () => (await readFile(sentFile, 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l));
     await lane(['escalate', 'a question', questionFile], inside);
+    const asked = await token();
+    assert.ok(asked.startsWith(reportDir), asked);
+    assert.equal(await readFile(asked, 'utf8'), 'Should the coordinator decide?');
     if (surface === 'hc') {
-      const asked = (await rows())[id].labels.lane_report;
-      assert.ok(asked.startsWith(reportDir), asked);
-      assert.equal(await readFile(asked, 'utf8'), 'Should the coordinator decide?');
       const sentList = await sent();
       assert.ok(sentList.at(-1).msg.includes(`Read the full question: ${asked}; answer with:`), sentList.at(-1).msg);
     }
@@ -222,10 +228,10 @@ for (const surface of ['herdr', 'hc']) {
     assert.equal((await goal(id)).goal_status, 'escalated');
     await lane(['reply', 'managed', 'an answer']);
     assert.equal((await goal(id)).goal_status, 'active');
-    await lane(['done', 'done', reportFile], inside);
+    const { stdout: doneOut } = await lane(['done', 'done', reportFile], inside);
     assert.equal((await goal(id)).goal_status, 'done');
-    const row = await rows();
-    const laneReport = surface === 'herdr' ? row[id].sources['herdr-spawn'].lane_report : row[id].labels.lane_report;
+    const laneReport = await token();
+    assert.equal(doneOut, `lane.sh: stored the report at ${laneReport}\n`);
     assert.ok(laneReport.startsWith('/'), laneReport);
     assert.ok(laneReport.startsWith(reportDir), laneReport);
     const copyStat = await stat(laneReport);
@@ -256,6 +262,12 @@ for (const surface of ['herdr', 'hc']) {
     await mkdir(wideDir);
     await chmod(wideDir, 0o755);
     await assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: wideDir }), /not private/);
+    const refuseDir = (dir, pattern) =>
+      assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: dir }), pattern);
+    await refuseDir('reports', /must be an absolute path/);
+    await refuseDir(join(reportDir, 'with space'), /must be an absolute path/);
+    await refuseDir(join(reportDir, 'x'.repeat(60)), /herdr cuts token values at 79/);
+    await refuseDir(join(reportFile, 'sub'), /could not create the report directory/);
     assert.equal(await readFile(db, 'utf8'), beforeRefusals);
     assert.equal(await readFile(sentFile, 'utf8'), sentBefore);
 
