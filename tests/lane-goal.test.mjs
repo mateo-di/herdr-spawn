@@ -78,6 +78,7 @@ switch (basename(process.argv[1])) {
       }
       case 'send':
         if (process.env.GOAL_FAIL === '1') no();
+        fs.appendFileSync(process.env.GOAL_MOCK_SENT, JSON.stringify({ to: b, msg: args[3] }) + '\\n');
         break;
       default: assert.fail(a);
     }
@@ -135,6 +136,9 @@ for (const surface of ['herdr', 'hc']) {
   test(`goal manifests and lifecycle over ${surface}`, async t => {
     const root = await mkdtemp(join(tmpdir(), 'herdr-lane-goal-'));
     t.after(() => rm(root, { recursive: true, force: true }));
+    // A short fixed prefix keeps the stored path under herdr's 79-character cap whatever tmpdir() is.
+    const reportDir = await mkdtemp('/tmp/hsr-');
+    t.after(() => rm(reportDir, { recursive: true, force: true }));
     const db = join(root, 'db');
     const brief = join(root, 'brief');
     const conf = join(root, 'agents.conf');
@@ -158,6 +162,7 @@ for (const surface of ['herdr', 'hc']) {
       HERDR_ENV: surface === 'herdr' ? '1' : '', HERDR_PANE_ID: 'parent', HC_TERMINAL_ID: 'parent',
       HC_SOCKET: 'mock-socket', HC_SESSION: 'mock-session',
       HERDR_SPAWN_CONFIG: conf, XDG_STATE_HOME: state, SHELL: '/bin/bash', OPENCODE_CONFIG_CONTENT: '',
+      HERDR_SPAWN_REPORT_DIR: reportDir, GOAL_MOCK_SENT: join(root, 'sent'),
     };
     const invoke = (script, args, extra = {}) =>
       run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
@@ -201,16 +206,77 @@ for (const surface of ['herdr', 'hc']) {
     assert.ok(!before.includes('Exact'), 'objective must not be in terminal metadata');
 
     const inside = { HERDR_PANE_ID: id, HC_TERMINAL_ID: id, LANE_COORDINATOR: 'parent', LANE_MODE: 'unit' };
-    await lane(['escalate', 'a question'], inside);
+    const token = async () => {
+      const r = (await rows())[id];
+      return surface === 'herdr' ? r.sources['herdr-spawn'].lane_report : r.labels.lane_report;
+    };
+    const reportFile = join(root, 'report.md');
+    const questionFile = join(root, 'question.md');
+    const sentFile = join(root, 'sent');
+    await writeFile(sentFile, '');
+    await writeFile(reportFile, 'The lane finished its unit.');
+    await writeFile(questionFile, 'Should the coordinator decide?');
+    const sent = async () => (await readFile(sentFile, 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l));
+    await lane(['escalate', 'a question', questionFile], inside);
+    const asked = await token();
+    assert.ok(asked.startsWith(reportDir), asked);
+    assert.equal(await readFile(asked, 'utf8'), 'Should the coordinator decide?');
+    if (surface === 'hc') {
+      const sentList = await sent();
+      assert.ok(sentList.at(-1).msg.includes(`Read the full question: ${asked}; answer with:`), sentList.at(-1).msg);
+    }
     assert.equal((await goal(id)).goal_status, 'escalated');
     await assert.rejects(lane(['reply', 'managed', 'no delivery'], { GOAL_FAIL: '1' }), /state is unchanged/);
     assert.equal((await goal(id)).goal_status, 'escalated');
     await lane(['reply', 'managed', 'an answer']);
     assert.equal((await goal(id)).goal_status, 'active');
-    await lane(['done', 'done'], inside);
+    const { stdout: doneOut } = await lane(['done', 'done', reportFile], inside);
     assert.equal((await goal(id)).goal_status, 'done');
+    const laneReport = await token();
+    assert.equal(doneOut, `lane.sh: stored the report at ${laneReport}\n`);
+    assert.ok(laneReport.startsWith('/'), laneReport);
+    assert.ok(laneReport.startsWith(reportDir), laneReport);
+    const copyStat = await stat(laneReport);
+    assert.equal(copyStat.mode & 0o777, 0o600);
+    assert.equal(await readFile(laneReport, 'utf8'), 'The lane finished its unit.');
+    if (surface === 'hc') {
+      const sentList = await sent();
+      assert.ok(sentList.at(-1).msg.includes(`Read its report: ${laneReport}`), sentList.at(-1).msg);
+    }
     await lane(['working'], inside);
     assert.deepEqual(await goal(id), original);
+
+    // A refused report sets no token or label and sends no notice.
+    const beforeRefusals = await readFile(db, 'utf8');
+    const sentBefore = await readFile(sentFile, 'utf8');
+    await assert.rejects(lane(['done', 'a summary', join(root, 'missing.md')], inside), /report file is not a readable regular file/);
+    await writeFile(join(root, 'empty.md'), '');
+    await assert.rejects(lane(['done', 'a summary', join(root, 'empty.md')], inside), /report file is empty/);
+    await mkdir(join(root, 'adir'));
+    await assert.rejects(lane(['done', 'a summary', join(root, 'adir')], inside), /report file is not a readable regular file/);
+    await writeFile(join(root, 'big.md'), 'x'.repeat(262145));
+    await assert.rejects(lane(['done', 'a summary', join(root, 'big.md')], inside), /report file is larger than 262144 bytes/);
+    const linkDir = join(root, 'reports-link');
+    await mkdir(join(root, 'reports-real'), { mode: 0o700 });
+    await symlink(join(root, 'reports-real'), linkDir);
+    await assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: linkDir }), /not private/);
+    const wideDir = join(root, 'reports-wide');
+    await mkdir(wideDir);
+    await chmod(wideDir, 0o755);
+    await assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: wideDir }), /not private/);
+    const refuseDir = (dir, pattern) =>
+      assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: dir }), pattern);
+    await refuseDir('reports', /must be an absolute path/);
+    await refuseDir(join(reportDir, 'with space'), /must be an absolute path/);
+    const longDir = join(reportDir, 'x'.repeat(60));
+    await refuseDir(longDir, /herdr cuts token values at 79/);
+    await assert.rejects(stat(longDir), { code: 'ENOENT' });
+    await refuseDir(join(reportFile, 'sub'), /could not create the report directory/);
+    await assert.rejects(
+      lane(['done', 'a summary', reportFile], { ...inside, LC_ALL: 'en_US.UTF-8', HERDR_SPAWN_REPORT_DIR: join(reportDir, 'é') }),
+      /must be an absolute path of letters, digits/);
+    assert.equal(await readFile(db, 'utf8'), beforeRefusals);
+    assert.equal(await readFile(sentFile, 'utf8'), sentBefore);
 
     await spawnLane('claude', 'native');
     const native = await goal('native');

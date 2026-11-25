@@ -10,7 +10,7 @@
 # state, and the watcher wakes it.
 # After three blocks in a row the stop goes through and the watcher's stopped notice takes over, rather than
 # spinning the agent. The count starts over when the lane's lane_report token changes (lane.sh, including a
-# coordinator's reply, sets a fresh one), so this script keeps the only file and lanes write none.
+# coordinator's reply, sets a fresh one), so the count file is the only state this script keeps.
 # In the Herdr app (HERDR_ENV not 1, HC_TERMINAL_ID set) the state comes from hc labels. No watcher runs there,
 # so the pass after three blocks sends the coordinator the stopped notice itself, once per stretch, and records
 # that in the count file.
@@ -41,7 +41,7 @@ if [ -n "${LANE_MODE:-}" ]; then
       jq -r '.result.agent.tokens | "\(.lane_state // "-") \(.lane_report // "-")"') || st=-
   fi
   [ "$st" != working ] || [ -n "${LANE_PENDING:-}" ] ||
-    reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, write the full report in your reply, then run: $dir/lane.sh done \"<one-line summary>\". If you are blocked on something only your coordinator can decide, write the full question with options and your recommendation, then run: $dir/lane.sh escalate \"<one-line summary>\". Otherwise keep working toward the goal."
+    reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, write the full report to a file outside your repo, then run: $dir/lane.sh done \"<one-line summary>\" <report file>. If you are blocked on something only your coordinator can decide, write the full question with options and your recommendation to a file, then run: $dir/lane.sh escalate \"<one-line summary>\" <question file>. Otherwise keep working toward the goal."
 else
   # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks.
   if [ "$app" = 1 ]; then

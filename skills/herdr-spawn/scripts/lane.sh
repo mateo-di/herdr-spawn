@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# Usage (in a lane):        lane.sh done "<one-line summary>" | escalate "<one-line summary>" | working
+# Usage (in a lane):        lane.sh done "<one-line summary>" <report-file>
+#                           lane.sh escalate "<one-line summary>" <question-file> | working
 #       (in the coordinator): lane.sh reply <lane-name|pane> "<answer>" | goal <lane-name|pane-or-terminal>
 # A lane declares its state in the lane_state pane token (working, done, escalated) instead of the watcher
-# guessing it, and only talks to herdr: it writes no files, so no harness sandbox can get in the way. done and
-# escalate also set lane_note (the summary on one line, capped at 76 characters plus "..." because herdr cuts a
-# token value at 79 silently); every call sets lane_report to a fresh stamp, which is how lanes-watch.sh sees a
-# new declaration and queues the notice. reply sends the coordinator's answer to a lane, marks it working again
-# and makes sure the coordinator's watcher runs. Needs HERDR_PANE_ID, LANE_COORDINATOR and LANE_MODE in a lane
-# (spawn.sh --lane exports the last two).
+# guessing it, and otherwise only talks to herdr. done and escalate copy the lane's report file into a private
+# per-user directory under /tmp before setting any token, so the report outlives its pane and lane_report carries
+# the copy's path. Most lane sandboxes can write there (Codex workspace-write includes /tmp); a read-only one
+# cannot, and such a lane cannot report done. Both also set lane_note (the summary on one line, capped at 76
+# characters plus "..." because herdr cuts a token value at 79 silently); every call sets lane_report afresh (a
+# stamp, or that copy's path for done and escalate), which is how lanes-watch.sh sees a new declaration and queues
+# the notice. reply sends the coordinator's answer to a lane, marks it working again and makes sure the
+# coordinator's watcher runs. Needs HERDR_PANE_ID, LANE_COORDINATOR and LANE_MODE in a lane (spawn.sh --lane
+# exports the last two).
 # In the Herdr app (HERDR_ENV not 1, HC_TERMINAL_ID set) the same state lives in hc labels on the lane's terminal.
 # No watcher runs there, so done and escalate send the notice to the coordinator themselves, and hc notes the
 # parent when a child is blocked, errors or exits. Needs HC_TERMINAL_ID, LANE_COORDINATOR and LANE_MODE in a lane.
 set -euo pipefail
 
 die() { echo "lane.sh: $*" >&2; exit 1; }
-usage="usage: lane.sh done \"<one-line summary>\" | escalate \"<one-line summary>\" | working | reply <lane> \"<answer>\" | goal <lane-name|pane-or-terminal>"
+usage="usage: lane.sh done \"<one-line summary>\" <report-file> | escalate \"<one-line summary>\" <question-file> | working | reply <lane> \"<answer>\" | goal <lane-name|pane-or-terminal>"
 [ $# -ge 1 ] || die "$usage"
 cmd=$1
 command -v jq >/dev/null || die "jq is required"
@@ -25,13 +29,44 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
 fi
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 
+# One stamp per call. reply and working report it plainly; done and escalate replace it with their report copy.
+stamp=$(date +%s)-$$-$RANDOM
+report=$stamp
+
+# Copies the lane's report file into a private per-user directory and prints the copy's path. The directory is
+# made on every call (age-based /tmp cleaning removes it) and must be ours, a real directory and mode 0700.
+store_report() { # <file>
+  local LC_ALL=C
+  local src=$1 dir=${HERDR_SPAWN_REPORT_DIR:-/tmp/herdr-spawn-reports-$(id -u)} path size
+  # ASCII only (in the C locale, so bytes) and absolute: the path rides in tab- and space-split fields and
+  # herdr's 79 cap counts bytes.
+  [[ $dir =~ ^/[A-Za-z0-9._/-]+$ ]] ||
+    die "HERDR_SPAWN_REPORT_DIR must be an absolute path of letters, digits and . _ - /: $dir"
+  path=$dir/$stamp.md
+  [ ${#path} -le 79 ] ||
+    die "the report path is ${#path} characters and herdr cuts token values at 79; set HERDR_SPAWN_REPORT_DIR to a shorter directory"
+  [ -f "$src" ] && [ -r "$src" ] || die "report file is not a readable regular file: $src"
+  [ -s "$src" ] || die "report file is empty: $src"
+  size=$(wc -c <"$src") || die "could not read the report file: $src"
+  size=$(printf '%s' "$size" | tr -d '[:space:]')
+  [ "$size" -le 262144 ] || die "report file is larger than 262144 bytes: $src"
+  # shellcheck disable=SC2174 # only the deepest directory is ours; the check below rejects a wrong mode
+  [ -L "$dir" ] || mkdir -p -m 700 "$dir" 2>/dev/null || die "could not create the report directory $dir; set HERDR_SPAWN_REPORT_DIR to an absolute directory you can write, such as one under your TMPDIR"
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] &&
+    [ -n "$(find "$dir" -prune -perm 0700 -print)" ] ||
+    die "the report directory $dir is not private; it must be a real directory owned by you with mode 0700; set HERDR_SPAWN_REPORT_DIR to another directory"
+  (umask 077; cp -- "$src" "$path") 2>/dev/null || die "could not copy the report file to $path"
+  chmod 600 -- "$path" 2>/dev/null || die "could not restrict the report copy to mode 600: $path"
+  printf '%s\n' "$path"
+}
+
 # One report that re-sends lane_of and lane_mode with the state, so it is correct whether a report merges or
 # replaces a source's tokens. Further tokens (lane_note) follow as extra arguments.
 set_state() { # <pane> <coordinator> <mode> <state> [--token k=v ...]
   local pane=$1 of=$2 mode=$3 state=$4
   shift 4
   herdr pane report-metadata "$pane" --source herdr-spawn --token "lane_of=$of" --token "lane_mode=$mode" \
-    --token "lane_state=$state" --token "lane_report=$(date +%s)-$$-$RANDOM" "$@" >/dev/null ||
+    --token "lane_state=$state" --token "lane_report=$report" "$@" >/dev/null ||
     die "could not record lane_state=$state on $pane"
 }
 
@@ -39,7 +74,7 @@ set_state() { # <pane> <coordinator> <mode> <state> [--token k=v ...]
 app_state() { # <terminal> <coordinator> <mode> <state> [k=v ...]
   local term=$1 of=$2 mode=$3 state=$4
   shift 4
-  hc label "$term" "lane_of=$of" "lane_mode=$mode" "lane_state=$state" "lane_report=$(date +%s)-$$-$RANDOM" "$@" >/dev/null ||
+  hc label "$term" "lane_of=$of" "lane_mode=$mode" "lane_state=$state" "lane_report=$report" "$@" >/dev/null ||
     die "could not record lane_state=$state on $term"
 }
 
@@ -53,7 +88,7 @@ note() {
 
 case $cmd in
   done|escalate)
-    [ $# -eq 2 ] && [ -n "$2" ] || die "$usage"
+    [ $# -eq 3 ] && [ -n "$2" ] && [ -n "$3" ] || die "$usage"
     ;;
   working) [ $# -eq 1 ] || die "$usage" ;;
   reply) [ $# -eq 3 ] && [ -n "$3" ] || die "$usage" ;;
@@ -143,15 +178,16 @@ if [ "$app" = 1 ]; then
   fi
   state="done"
   if [ "$cmd" = escalate ]; then state=escalated; fi
+  report=$(store_report "$3") || exit 1
   n=$(note "$2" | tr -d '[:cntrl:]')
   info=$(hc get "$HC_TERMINAL_ID" --json 2>/dev/null) || info='{}'
   name=$(jq -r '.name // empty' <<<"$info" 2>/dev/null) || name=''
   [ -n "$name" ] || name=$HC_TERMINAL_ID
   app_state "$HC_TERMINAL_ID" "$LANE_COORDINATOR" "$LANE_MODE" "$state" "lane_note=$n"
   if [ "$cmd" = "done" ]; then
-    msg="[lane $name] done: $n. Read its report: hc read $name --lines 120"
+    msg="[lane $name] done: $n. Read its report: $report"
   else
-    msg="[lane $name] escalation: $n. Read the full question: hc read $name --lines 80; answer with: $here/lane.sh reply $name \"<answer>\""
+    msg="[lane $name] escalation: $n. Read the full question: $report; answer with: $here/lane.sh reply $name \"<answer>\""
   fi
   if ! hc send "$LANE_COORDINATOR" -- "$msg" >/dev/null; then
     hc label "$HC_TERMINAL_ID" "lane_state=$(jq -r '.labels.lane_state // "working"' <<<"$info")" \
@@ -159,6 +195,7 @@ if [ "$app" = 1 ]; then
       "lane_note=$(jq -r '.labels.lane_note // ""' <<<"$info")" >/dev/null || true
     die "the coordinator $LANE_COORDINATOR did not take the notice (blocked or gone?); lane_state is unchanged, run lane.sh $cmd again"
   fi
+  printf 'lane.sh: stored the report at %s\n' "$report"
   exit 0
 fi
 
@@ -166,8 +203,13 @@ fi
 : "${LANE_COORDINATOR:?lane.sh $cmd runs inside a lane: LANE_COORDINATOR is not set (spawn with --lane)}"
 : "${LANE_MODE:?lane.sh $cmd runs inside a lane: LANE_MODE is not set (spawn with --lane)}"
 
+if [ "$cmd" != working ]; then
+  report=$(store_report "$3") || exit 1
+fi
+
 case $cmd in
   working) set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" working ;;
   "done") set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" "done" --token "lane_note=$(note "$2")" ;;
   escalate) set_state "$HERDR_PANE_ID" "$LANE_COORDINATOR" "$LANE_MODE" escalated --token "lane_note=$(note "$2")" ;;
 esac
+if [ "$cmd" != working ]; then printf 'lane.sh: stored the report at %s\n' "$report"; fi
