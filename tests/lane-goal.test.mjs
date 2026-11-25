@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,11 +29,18 @@ const create = (label, parent) => {
   const seq = Object.keys(db).length + 1;
   const tab = parent?.tab ?? 'tab' + seq;
   const id = (basename(process.argv[1]) === 'hc' ? 't' : tab + ':p') + seq;
-  db[id] = { id, label, tab, cwd: flag('--cwd'), sources: {}, labels: {} };
+  db[id] = { id, label, tab, cwd: flag('--cwd'), sources: {}, labels: {},
+    session: process.env.MOCK_NO_SESSION === '1' ? null : 'session-' + seq,
+    session_after: Number(process.env.MOCK_SESSION_AFTER) || 0, session_calls: 0 };
   return db[id];
 };
-const pane = row => ({ pane_id: row.id, tokens: Object.assign({}, ...Object.values(row.sources)),
-  agent: row.label === 'managed' ? 'opencode' : 'claude', agent_status: 'working' });
+const pane = (row, hidden = false) => {
+  const agent = { pane_id: row.id, name: row.name ?? null,
+    tokens: Object.assign({}, ...Object.values(row.sources)),
+    agent: row.label === 'managed' ? 'opencode' : 'claude', agent_status: 'working' };
+  if (!hidden && row.session) agent.agent_session = { value: row.session };
+  return agent;
+};
 const no = () => process.exit(1);
 switch (basename(process.argv[1])) {
   case 'herdr-app':
@@ -87,9 +94,16 @@ switch (basename(process.argv[1])) {
     switch (a + ' ' + b) {
       case 'agent get': {
         const row = find(c) ?? no();
-        out({ result: { agent: pane(row) } });
+        if (row.session_after) {
+          row.session_calls = (row.session_calls ?? 0) + 1;
+          save();
+        }
+        out({ result: { agent: pane(row, row.session_after > 0 && row.session_calls < row.session_after) } });
         break;
       }
+      case 'agent list':
+        out({ result: { agents: Object.values(db).map(row => pane(row)) } });
+        break;
       case 'pane get':
         out({ result: { pane: pane((db[c] ?? db[c.replace(/^p_(\\d+)$/, 'tab1:p$1')]) ?? no()) } });
         break;
@@ -120,7 +134,7 @@ switch (basename(process.argv[1])) {
         save();
         break;
       case 'agent rename':
-        if (process.env.GOAL_FAIL === 'rename') no();
+        if (process.env.GOAL_FAIL === 'rename' || process.env.RENAME_FAIL_PANE === c) no();
         (find(c) ?? no()).name = args[3];
         save();
         break;
@@ -451,3 +465,413 @@ for (const surface of ['herdr', 'hc']) {
     await lane(['working'], inside);
   });
 }
+
+async function restoreFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), 'herdr-lane-restore-'));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5 }));
+  const db = join(root, 'db');
+  const brief = join(root, 'brief');
+  const state = join(root, 'state');
+  const goals = join(state, 'herdr-spawn', 'goals');
+  const watchlog = join(root, 'watch.log');
+  await mkdir(state);
+  await writeFile(db, '{}');
+  await writeFile(brief, 'Test brief');
+  await writeFile(join(root, 'cli'), cli, { mode: 0o700 });
+  for (const name of ['herdr-app', 'herdr', 'hc']) await symlink('cli', join(root, name));
+  await writeFile(join(root, 'setsid'), '#!/bin/sh\nprintf "%s\\n" "$*" >>"$WATCH_LOG"\n', { mode: 0o700 });
+  const env = {
+    ...process.env, PATH: `${root}:${process.env.PATH}`, GOAL_MOCK: db, GOAL_FAIL: '0',
+    HERDR_ENV: '1', HERDR_PANE_ID: 'parent', HC_TERMINAL_ID: '',
+    XDG_STATE_HOME: state, SHELL: '/bin/bash', WATCH_LOG: watchlog,
+    HERDR_SPAWN_CONFIG: join(root, 'agents.conf'), OPENCODE_CONFIG_CONTENT: '',
+    HERDR_SPAWN_REPORT_DIR: join(root, 'reports'),
+  };
+  const report = join(root, 'report.md');
+  await writeFile(report, 'Test report');
+  const invoke = (script, args, extra = {}, timeout = 10_000) =>
+    run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout });
+  const spawn = (name, extra, timeout) => invoke('spawn.sh',
+    ['--tab', root, '--lane', 'unit', '--goal', `Objective for ${name}`, 'opencode', name, brief], extra, timeout);
+  const idOf = stdout => stdout.trim().split(' ')[0];
+  const rows = async () => JSON.parse(await readFile(db, 'utf8'));
+  const setRows = async all => writeFile(db, JSON.stringify(all));
+  const goalId = async pane => (await rows())[pane].sources['herdr-spawn-goal'].goal_id;
+  const recordFile = async pane => join(goals, await goalId(pane), 'lane.json');
+  const record = async pane => JSON.parse(await readFile(await recordFile(pane), 'utf8'));
+  const forget = async pane => {
+    const all = await rows();
+    delete all[pane].name;
+    delete all[pane].sources['herdr-spawn'];
+    delete all[pane].sources['herdr-spawn-goal'];
+    await setRows(all);
+  };
+  const watch = async () => {
+    try { return await readFile(watchlog, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return ''; throw e; }
+  };
+  // spawn.sh itself starts the watcher, so discard that start before checking a later one. The detached stub
+  // writes asynchronously, so give it a moment before reading the log.
+  const clearWatch = () => rm(watchlog, { force: true });
+  const pause = () => new Promise(resolve => setTimeout(resolve, 200));
+  const settledWatch = async () => {
+    for (let i = 0; i < 20 && !(await watch()); i++) await pause();
+    return watch();
+  };
+  return { root, report, goals, invoke, spawn, idOf, rows, setRows, goalId, recordFile, record, forget, watch, clearWatch, pause, settledWatch };
+}
+
+test('spawn.sh records a restorable TUI lane', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  assert.deepEqual(await f.record(id), {
+    name: 'managed', pane: id, lane_of: 'parent', lane_mode: 'unit',
+    agent: 'opencode', agent_session: (await f.rows())[id].session,
+  });
+  assert.equal((await stat(await f.recordFile(id))).mode & 0o777, 0o400);
+
+  // The session reaches the mock on the third agent get; the bounded poll must wait for it.
+  const late = await f.spawn('late', { MOCK_SESSION_AFTER: '3' });
+  const lateId = f.idOf(late.stdout);
+  assert.doesNotMatch(late.stderr, /cannot be restored/);
+  assert.deepEqual(await f.record(lateId), {
+    name: 'late', pane: lateId, lane_of: 'parent', lane_mode: 'unit',
+    agent: 'claude', agent_session: (await f.rows())[lateId].session,
+  });
+
+  const { stdout, stderr } = await f.spawn('nosession', { MOCK_NO_SESSION: '1' }, 15_000);
+  assert.match(stderr, /no agent_session after 5s \(is Herdr's claude integration installed\? see: herdr integration status\)/);
+  const noId = f.idOf(stdout);
+  assert.equal((await f.rows())[noId].name, 'nosession');
+  await assert.rejects(f.record(noId), { code: 'ENOENT' });
+});
+
+test('lane.sh restore re-applies a restarted lane and starts its watcher', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  const gid = await f.goalId(id);
+  await f.forget(id);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: restored on ${id}`));
+  const row = (await f.rows())[id];
+  assert.equal(row.name, 'managed');
+  assert.deepEqual(row.sources['herdr-spawn-goal'], { goal_id: gid, goal_mode: 'managed', goal_startup: 'ready' });
+  const tokens = row.sources['herdr-spawn'];
+  assert.equal(tokens.lane_of, 'parent');
+  assert.equal(tokens.lane_mode, 'unit');
+  assert.equal(tokens.lane_state, 'working');
+  assert.match(tokens.lane_report, /^\d+-\d+-\d+$/);
+  assert.match(await f.settledWatch(), /lanes-watch.sh parent/);
+});
+
+test('lane.sh restore ignores other coordinators and already named lanes', async t => {
+  const f = await restoreFixture(t);
+  const mine = f.idOf((await f.spawn('managed')).stdout);
+  const other = f.idOf((await f.spawn('other')).stdout);
+  const named = f.idOf((await f.spawn('keeper')).stdout);
+  const otherFile = await f.recordFile(other);
+  await f.forget(mine);
+  await f.forget(other);
+  await chmod(otherFile, 0o600);
+  await writeFile(otherFile, JSON.stringify({ ...JSON.parse(await readFile(otherFile, 'utf8')), lane_of: 'elsewhere' }));
+  await chmod(otherFile, 0o400);
+  const keeperTokens = JSON.stringify((await f.rows())[named].sources);
+
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, /managed: restored on/);
+  assert.match(stdout, /keeper: present/);
+  assert.doesNotMatch(stdout, /other:/);
+  const all = await f.rows();
+  assert.equal(all[other].name, undefined);
+  assert.deepEqual(all[other].sources, {});
+  assert.equal(JSON.stringify(all[named].sources), keeperTokens);
+});
+
+test('lane.sh restore reports not running and ambiguous sessions', async t => {
+  const f = await restoreFixture(t);
+  const gone = f.idOf((await f.spawn('managed')).stdout);
+  await f.forget(gone);
+  const all = await f.rows();
+  delete all[gone];
+  await f.setRows(all);
+  await f.clearWatch();
+  assert.match((await f.invoke('lane.sh', ['restore'])).stdout, /managed: not running/);
+  await f.pause();
+  assert.equal(await f.watch(), '');
+
+  const g = await restoreFixture(t);
+  const a = g.idOf((await g.spawn('managed')).stdout);
+  const b = g.idOf((await g.spawn('second')).stdout);
+  const files = [await g.recordFile(a), await g.recordFile(b)];
+  await g.forget(a);
+  await g.forget(b);
+  const both = await g.rows();
+  both[a].session = 'shared-session';
+  both[b].session = 'shared-session';
+  await g.setRows(both);
+  for (const file of files) {
+    await chmod(file, 0o600);
+    await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, 'utf8')), agent_session: 'shared-session' }));
+    await chmod(file, 0o400);
+  }
+  await g.clearWatch();
+  const { stdout } = await g.invoke('lane.sh', ['restore']);
+  assert.match(stdout, /managed: ambiguous, 2 panes share its session/);
+  assert.match(stdout, /second: ambiguous, 2 panes share its session/);
+  assert.equal((await g.rows())[a].name, undefined);
+  assert.equal((await g.rows())[b].name, undefined);
+  await g.pause();
+  assert.equal(await g.watch(), '');
+});
+
+test('lane.sh restore works in the herdr TUI only', async t => {
+  const f = await restoreFixture(t);
+  await assert.rejects(f.invoke('lane.sh', ['restore'], { HERDR_ENV: '', HC_TERMINAL_ID: 'parent' }),
+    /lane.sh restore works in the herdr TUI only/);
+});
+
+test('in-lane done reads lane tokens after a restart', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  const before = (await f.rows())[id].sources['herdr-spawn'];
+  await f.clearWatch();
+  await f.invoke('lane.sh', ['done', 'finished from pane tokens', f.report],
+    { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' });
+  const tokens = (await f.rows())[id].sources['herdr-spawn'];
+  assert.equal(tokens.lane_of, before.lane_of);
+  assert.equal(tokens.lane_mode, before.lane_mode);
+  assert.equal(tokens.lane_state, 'done');
+  assert.equal(tokens.lane_note, 'finished from pane tokens');
+  assert.match(tokens.lane_report, /^.*\/reports\/\d+-\d+-\d+\.md$/);
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('in-lane done restores itself from its lane record', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  const gid = await f.goalId(id);
+  await f.forget(id);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['done', 'finished after restore', f.report],
+    { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' });
+  assert.match(stdout, new RegExp(`managed: restored on ${id}`));
+  const row = (await f.rows())[id];
+  assert.equal(row.name, 'managed');
+  assert.deepEqual(row.sources['herdr-spawn-goal'], { goal_id: gid, goal_mode: 'managed', goal_startup: 'ready' });
+  const tokens = row.sources['herdr-spawn'];
+  assert.equal(tokens.lane_of, 'parent');
+  assert.equal(tokens.lane_mode, 'unit');
+  assert.equal(tokens.lane_state, 'done');
+  assert.equal(tokens.lane_note, 'finished after restore');
+  assert.match(tokens.lane_report, /^.*\/reports\/\d+-\d+-\d+\.md$/);
+  assert.match(await f.settledWatch(), /lanes-watch.sh parent/);
+});
+
+test('in-lane done fails without tokens or a lane record', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  const file = await f.recordFile(id);
+  await f.forget(id);
+  await rm(file);
+  await f.clearWatch();
+  await assert.rejects(f.invoke('lane.sh', ['done', 'nothing', f.report],
+    { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' }), /has no lane tokens and no single lane record/);
+  assert.deepEqual((await f.rows())[id].sources, {});
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('in-lane done rejects pane tokens that do not name a coordinator and mode', async t => {
+  for (const tokens of [{ lane_mode: 'unit' }, { lane_of: '-', lane_mode: 'unit' }, { lane_of: 'w1:p1', lane_mode: 'x' }]) {
+    const f = await restoreFixture(t);
+    const id = f.idOf((await f.spawn('managed')).stdout);
+    const file = await f.recordFile(id);
+    await f.forget(id);
+    await rm(file);
+    const all = await f.rows();
+    all[id].sources['herdr-spawn'] = tokens;
+    await f.setRows(all);
+    await assert.rejects(f.invoke('lane.sh', ['done', 'nothing', f.report],
+      { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' }), /has no lane tokens and no single lane record/);
+    assert.deepEqual((await f.rows())[id].sources['herdr-spawn'], tokens);
+  }
+});
+
+test('lane.sh restore does not treat another coordinator\'s same-named lane as present', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  all[y].sources['herdr-spawn'] = { lane_of: 'elsewhere', lane_mode: 'unit' };
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, pane ${y} holds the name`));
+  assert.doesNotMatch(stdout, /present/);
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('in-lane self-restore reports a name another pane holds', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  await f.setRows(all);
+  await f.clearWatch();
+  await assert.rejects(f.invoke('lane.sh', ['done', 'nothing', f.report],
+    { HERDR_PANE_ID: x, LANE_COORDINATOR: '', LANE_MODE: '' }), err => {
+    assert.match(err.stdout, new RegExp(`pane ${y} holds the name`));
+    return true;
+  });
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('lane.sh restore does not treat a same-coordinator lane on another pane as present', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  all[y].sources['herdr-spawn'] = { lane_of: 'parent', lane_mode: 'unit' };
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, pane ${y} holds the name`));
+  assert.doesNotMatch(stdout, /present/);
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+});
+
+test('in-lane self-restore reports a same-coordinator lane on another pane holding the name', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  all[y].sources['herdr-spawn'] = { lane_of: 'parent', lane_mode: 'unit' };
+  await f.setRows(all);
+  await assert.rejects(f.invoke('lane.sh', ['done', 'nothing', f.report],
+    { HERDR_PANE_ID: x, LANE_COORDINATOR: '', LANE_MODE: '' }), err => {
+    assert.match(err.stdout, new RegExp(`pane ${y} holds the name`));
+    return true;
+  });
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+});
+
+test('lane.sh restore carries on after one lane fails to rename', async t => {
+  const f = await restoreFixture(t);
+  const a = f.idOf((await f.spawn('managed')).stdout);
+  const b = f.idOf((await f.spawn('second')).stdout);
+  await f.forget(a);
+  await f.forget(b);
+  const { stdout } = await f.invoke('lane.sh', ['restore'], { RENAME_FAIL_PANE: a });
+  assert.match(stdout, /managed: cannot restore, rename failed/);
+  assert.match(stdout, new RegExp(`second: restored on ${b}`));
+  const after = await f.rows();
+  assert.equal(after[a].name, undefined);
+  assert.deepEqual(after[a].sources, {});
+  assert.equal(after[b].name, 'second');
+});
+
+test('lane.sh restore says when goal.json has no goal_mode', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  const gid = await f.goalId(id);
+  const manifest = join(f.goals, gid, 'goal.json');
+  await chmod(manifest, 0o600);
+  const { goal_mode: _, ...rest } = JSON.parse(await readFile(manifest, 'utf8'));
+  await writeFile(manifest, JSON.stringify(rest));
+  await f.forget(id);
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, no goal_mode in .*${gid}/goal.json`));
+  assert.equal((await f.rows())[id].name, undefined);
+});
+
+test('lane.sh restore gives tokens back to a pane that kept its name', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  await f.forget(id);
+  const all = await f.rows();
+  all[id].name = 'managed';
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: restored on ${id}`));
+  const row = (await f.rows())[id];
+  assert.equal(row.name, 'managed');
+  assert.equal(row.sources['herdr-spawn'].lane_of, 'parent');
+  assert.equal(row.sources['herdr-spawn'].lane_state, 'working');
+  assert.match(await f.settledWatch(), /lanes-watch.sh parent/);
+});
+
+test('lane.sh restore does not take a name another pane holds', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, pane ${y} holds the name`));
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+  assert.equal(after[y].name, 'managed');
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('lane.sh restore skips symlinked goal directories and lane records', async t => {
+  const f = await restoreFixture(t);
+  const dirPane = f.idOf((await f.spawn('managed')).stdout);
+  const dir = join(f.goals, await f.goalId(dirPane));
+  await f.forget(dirPane);
+  await rename(dir, join(f.goals, 'hidden'));
+  await symlink(join(f.goals, 'hidden'), dir);
+
+  const filePane = f.idOf((await f.spawn('second')).stdout);
+  const file = await f.recordFile(filePane);
+  await f.forget(filePane);
+  await rename(file, `${file}.real`);
+  await symlink(`${file}.real`, file);
+
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.doesNotMatch(stdout, /restored on/);
+  assert.match(stdout, /lane\.json: skipped, not a valid lane record/);
+  const all = await f.rows();
+  assert.equal(all[dirPane].name, undefined);
+  assert.equal(all[filePane].name, undefined);
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});

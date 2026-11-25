@@ -179,7 +179,7 @@ switch (noun + ' ' + verb) {
   case 'agent get':
     if (!arg?.startsWith('p-')) process.exit(1);
     // Claim Codex is already present, even before its goal turn is ready.
-    console.log(JSON.stringify({ result: { agent: { pane_id: arg, agent: 'codex', agent_status: 'working' } } }));
+    console.log(JSON.stringify({ result: { agent: { pane_id: arg, agent: 'codex', agent_status: 'working', agent_session: { value: 'codex-session' } } } }));
     break;
   case 'tab create':
     assert.ok(process.argv.includes('--no-focus'));

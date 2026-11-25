@@ -3,11 +3,11 @@
 # Each harness's stop hook runs this (hooks/ for Claude Code and Codex, adapters/ for OpenCode and oh-my-pi) and
 # blocks the stop with what it prints; no output lets the session stop. Checking state in one script keeps the
 # roles the same in every harness.
-# A lane (LANE_MODE set) ends each stretch of work by reporting done or escalating, so it may not stop while its
-# lane_state is still working, unless the harness reports background work that will wake it (LANE_PENDING, set by
-# hooks/lane-stop.sh): a lane that waits on its worker is not stopping. A coordinator may not stop while one of
-# its lanes waits on its answer. Working lanes never hold a coordinator: waiting idle for notices is its normal
-# state, and the watcher wakes it.
+# A lane (LANE_MODE set, or in the herdr TUI a lane_mode token on its pane) ends each stretch of work by
+# reporting done or escalating, so it may not stop while its lane_state is still working, unless the harness
+# reports background work that will wake it (LANE_PENDING, set by hooks/lane-stop.sh): a lane that waits on its
+# worker is not stopping. A coordinator may not stop while one of its lanes waits on its answer. Working lanes
+# never hold a coordinator: waiting idle for notices is its normal state, and the watcher wakes it.
 # After three blocks in a row the stop goes through and the watcher's stopped notice takes over, rather than
 # spinning the agent. The count starts over when the lane's lane_report token changes (lane.sh, including a
 # coordinator's reply, sets a fresh one), so the count file is the only state this script keeps.
@@ -32,7 +32,15 @@ state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 count=$state/stopblock-${pane//[!A-Za-z0-9_-]/_}
 
 reason='' report=-
-if [ -n "${LANE_MODE:-}" ]; then
+lane=${LANE_MODE:-}
+if [ -z "$lane" ] && [ "$app" = 0 ]; then
+  # A Herdr restart drops the lane's LANE_MODE export; lane.sh restore puts its lane_mode token back. Any pane can
+  # set tokens, so only a lane's own pair counts: a lane_of and a lane_mode that spawn.sh could have written.
+  lane=$(herdr agent get "$pane" 2>/dev/null | jq -r '.result.agent.tokens
+    | select((.lane_of // "" | test("^[A-Za-z0-9][A-Za-z0-9_:.-]*$")) and (.lane_mode == "unit" or .lane_mode == "driver"))
+    | .lane_mode') || lane=''
+fi
+if [ -n "$lane" ]; then
   if [ "$app" = 1 ]; then
     read -r st report < <(hc get "$pane" --json 2>/dev/null |
       jq -r '.labels | "\(.lane_state // "-") \(.lane_report // "-")"') || st=-

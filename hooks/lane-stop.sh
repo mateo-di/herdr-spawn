@@ -4,10 +4,10 @@
 # Claude Code lists in-flight background work in the Stop input (background_tasks). A lane that is waiting on a
 # shell, subagent or workflow, or on more running teammates than lane-teammates.sh has marked idle, may stop: that
 # work's report wakes it. LANE_PENDING tells lane-stop-check.sh so. Codex sends no such list, so its lanes are held
-# as before.
+# as before. A lane restored after a Herdr restart has no LANE_MODE, so this runs for every stop; only a lane reads it.
 input=$(cat)
 pending=''
-if [ -n "${LANE_MODE:-}" ] && command -v jq >/dev/null; then
+if command -v jq >/dev/null; then
   session=$(jq -r '.session_id // "-" | tostring | gsub("[^A-Za-z0-9_-]"; "_")' <<<"$input" 2>/dev/null) || session=-
   idle=$(find "${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn/teammates-$session" -maxdepth 1 -type f 2>/dev/null | wc -l)
   pending=$(jq -r --argjson idle "$idle" '[.background_tasks // [] | arrays | .[] | objects
