@@ -82,6 +82,7 @@ const setup = async t => {
   const dir = join(root, 'slots');
   const env = { ...process.env, HERDR_SPAWN_HEAVY_DIR: dir, HERDR_SPAWN_HEAVY_POLL: '0.2' };
   delete env.HERDR_SPAWN_HEAVY_SLOTS;
+  delete env.HERDR_SPAWN_HEAVY_HELD;
   return { root, dir, env };
 };
 
@@ -205,6 +206,47 @@ test('frees the slot when the command is killed with SIGKILL', async t => {
   await waitFor(async () => (await readdir(dir)).length === 0);
 });
 
+test('a run right after another starts without waiting a full poll', async t => {
+  const { env } = await setup(t);
+  const slowPoll = { ...env, HERDR_SPAWN_HEAVY_SLOTS: '1', HERDR_SPAWN_HEAVY_POLL: '30' };
+  await runHeavy(['true'], slowPoll);
+  const second = startHeavy(['true'], slowPoll);
+  await finish(second, 5000);
+  assert.equal(second.code, 0);
+});
+
+test('a heavy.sh call inside a check runs at once', async t => {
+  const { root, env } = await setup(t);
+  const mark = join(root, 'inner');
+  const run = startHeavy(['bash', heavy, 'bash', '-c', 'echo inner > "$1"', 'bash', mark],
+    { ...env, HERDR_SPAWN_HEAVY_SLOTS: '1' });
+  await finish(run, 5000);
+  await run.read();
+  assert.equal(run.code, 0);
+  assert.equal(await readFile(mark, 'utf8'), 'inner\n');
+  assert.doesNotMatch(run.stderr, /waiting/);
+});
+
+test('the keeper leaves alone a slot taken over by someone else', async t => {
+  const { root, dir, env } = await setup(t);
+  const mark = join(root, 'started');
+  const run = startHeavy(['bash', '-c', 'echo started > "$1"; exec sleep 30', 'bash', mark],
+    { ...env, HERDR_SPAWN_HEAVY_SLOTS: '1' });
+  await waitFor(() => exists(mark));
+  const slot = join(dir, 'slot-1');
+  await rm(slot);
+  await symlink('other.1', slot);
+  const old = new Date(Date.now() - 5 * 60 * 1000);
+  await lutimes(slot, old, old);
+  await delay(2500);
+  assert.equal(await readlink(slot), 'other.1');
+  assert.ok((await lstat(slot)).mtimeMs < Date.now() - 4 * 60 * 1000);
+  process.kill(run.child.pid, 'SIGKILL');
+  await finish(run, 3000);
+  await delay(500);
+  assert.equal(await readlink(slot), 'other.1');
+});
+
 test('closes its output pipes when the command ends', async t => {
   const { env } = await setup(t);
   const child = spawn('bash', [heavy, 'bash', '-c', 'echo hi'],
@@ -265,7 +307,7 @@ for (const value of ['0', 'two']) {
   });
 }
 
-for (const value of ['soon', '-1']) {
+for (const value of ['soon', '-1', '0', '0.0']) {
   test(`refuses HERDR_SPAWN_HEAVY_POLL=${value} without running the command`, async t => {
     const { root, dir, env } = await setup(t);
     const mark = join(root, 'ran');

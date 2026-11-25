@@ -6,20 +6,23 @@
 # A slot is a symlink in a per-user directory under /tmp, because a sandboxed Codex lane may write /tmp but not
 # the rest of the home directory; ln -s takes it atomically, also on macOS, which has no flock. Once it holds a
 # slot, heavy.sh execs the command, so its signals, stdin and exit status are the command's own, and leaves a
-# keeper process that refreshes the link's mtime while the command runs and removes the link when it ends.
-# A link left unrefreshed for two to three minutes (find rounds the age to whole minutes) counts as abandoned:
-# a sandbox can hide the owner's process from a pid check. A lost takeover race, or a machine asleep that long,
-# lets extra checks run; nothing here blocks a check for good, and an unusable slot directory runs the command
-# at once with a warning.
+# keeper process that refreshes the link's mtime while the command runs and removes the link within a fraction
+# of a second after it ends. A link left unrefreshed for two to three minutes (find rounds the age to whole
+# minutes) counts as abandoned: a sandbox can hide the owner's process from a pid check. A lost takeover race,
+# or a machine asleep that long, lets extra checks run, and an unusable slot directory runs the command at once
+# with a warning. Only a stopped (suspended) check keeps its slot for as long as it stays stopped. A heavy.sh
+# call inside a check runs at once, because its caller already holds a slot and waiting could deadlock.
 # HERDR_SPAWN_HEAVY_SLOTS (default 2) must be the same for every lane on the machine; HERDR_SPAWN_HEAVY_POLL is
 # the wait between tries in seconds (default 10); HERDR_SPAWN_HEAVY_DIR moves the slot directory.
 set -uo pipefail
 
 [ $# -ge 1 ] || { echo "usage: heavy.sh <command> [args...]" >&2; exit 2; }
+[ -z "${HERDR_SPAWN_HEAVY_HELD:-}" ] || exec "$@"
 slots=${HERDR_SPAWN_HEAVY_SLOTS:-2}
 poll=${HERDR_SPAWN_HEAVY_POLL:-10}
 [[ $slots =~ ^[1-9][0-9]*$ ]] || { echo "heavy.sh: HERDR_SPAWN_HEAVY_SLOTS must be a whole number above 0" >&2; exit 2; }
-[[ $poll =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "heavy.sh: HERDR_SPAWN_HEAVY_POLL must be a number of seconds" >&2; exit 2; }
+[[ $poll =~ ^[0-9]+(\.[0-9]+)?$ && $poll =~ [1-9] ]] ||
+  { echo "heavy.sh: HERDR_SPAWN_HEAVY_POLL must be a number of seconds above 0" >&2; exit 2; }
 dir=${HERDR_SPAWN_HEAVY_DIR:-/tmp/herdr-spawn-heavy-$(id -u)}
 me=$$.$RANDOM
 held=
@@ -63,20 +66,31 @@ while :; do
       2) unslotted "cannot create slots in $dir" "$@" ;;
     esac
   done
-  [ -n "$waited" ] || echo "heavy.sh: all $slots slots are busy; waiting" >&2
-  waited=1
-  sleep "$poll"
+  if [ -n "$waited" ]; then
+    sleep "$poll"
+  else
+    # The first retry comes soon: a check that just ended frees its slot a moment later.
+    echo "heavy.sh: all $slots slots are busy; waiting" >&2
+    waited=1
+    sleep 1
+  fi
 done
 
 # The keeper is forked twice, so the command never sees it as a child of its own to wait for. It ignores the
-# signals that end the command, refreshes the lease while this pid (the command, after exec) lives, then frees
-# the slot if it is still ours. Its stdio is detached so it holds no caller's pipe open.
+# signals that end the command, refreshes the lease every 2 seconds while this pid (the command, after exec)
+# lives and the slot is still ours, then frees the slot if it is still ours. Its stdio is detached so it holds
+# no caller's pipe open.
 ( (
   trap '' HUP INT TERM
+  n=0
   while kill -0 $$ 2>/dev/null; do
-    touch -c -h "$held" 2>/dev/null
-    sleep 2
+    if [ $((n++ % 10)) = 0 ]; then
+      [ "$(readlink "$held" 2>/dev/null)" = "$me" ] || exit 0
+      touch -c -h "$held" 2>/dev/null
+    fi
+    sleep 0.2
   done
   if [ "$(readlink "$held" 2>/dev/null)" = "$me" ]; then rm -f "$held"; fi
 ) </dev/null >/dev/null 2>&1 & )
+export HERDR_SPAWN_HEAVY_HELD=1
 exec "$@"
