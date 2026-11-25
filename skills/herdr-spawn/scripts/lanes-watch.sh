@@ -2,10 +2,10 @@
 # Usage: lanes-watch.sh <coordinator-pane-id>
 # Started detached by `spawn.sh --lane` and by `lane.sh reply`. A coordinator that spawned lanes otherwise learns nothing
 # until it reads their panes, so this polls `herdr agent list` for agents whose lane_of token is the coordinator's
-# pane. Lanes declare their own state in a lane_state token (working, done, escalated) through lane.sh, which only
-# talks to herdr, so no harness sandbox gets in its way. A new lane_report stamp on a lane that is done or
-# escalated is a declaration, announced with the lane's lane_note (a lane first seen with one counts as new). The
-# watcher also covers what a lane cannot say for itself:
+# pane. Lanes declare their own state in a lane_state token (working, done, escalated) through lane.sh. done and
+# escalate hand lane.sh a report file, whose copy lane.sh stores; a new lane_report (the copy's path, or a plain stamp
+# from an older lane.sh) on a lane that is done or escalated is a declaration, announced with the lane's lane_note (a
+# lane first seen with one counts as new). The watcher also covers what a lane cannot say for itself:
 #   stopped   a lane whose state is still working has had an idle or done agent for ${HERDR_SPAWN_STOP_GRACE:-60}
 #             seconds: it went quiet without reporting. The grace absorbs a stop hook, goal judge or plugin that
 #             re-prompts the lane at the end of a turn; once per idle stretch, and a lane first seen idle counts.
@@ -83,6 +83,8 @@ events() {
   jq -nr --argjson prev "$1" --argjson cur "$2" --argjson open "$3" --argjson stall "$stall" --arg lanesh "$lanesh" '
     def where: "(\(.agent), pane \(.pane_id), mode \(.mode // "unit"))";
     def read: "herdr agent read \(.name) --source recent-unwrapped --lines 120";
+    # A path in lane_report is the stored copy of the report file; a plain stamp comes from an older lane.sh.
+    def copy($fallback): if (.report | startswith("/")) then .report else $fallback end;
     def row($kind; $text): [$kind, .name, .pane_id, (.report // "-"), $text] | join("\t");
     ($prev | map({key: .pane_id, value: .}) | from_entries) as $p
     | ($cur | map(.pane_id)) as $alive
@@ -90,9 +92,9 @@ events() {
        | (if .report != null and .report != $p[.pane_id].report and (.state | IN("done", "escalated")) then
             (.note // "" | gsub("[\r\n]+"; " ")) as $note
             | if .state == "done" then
-                row("done"; "[lane \(.name)] done: \($note). Read its report: \(read)")
+                row("done"; "[lane \(.name)] done: \($note). Read its report: \(copy(read))")
               else
-                row("escalation"; "[lane \(.name)] escalation: \($note). Read the full question: herdr agent read \(.name) --source recent-unwrapped --lines 80; answer with: \($lanesh) reply \(.name) \"<answer>\"")
+                row("escalation"; "[lane \(.name)] escalation: \($note). Read the full question: \(copy("herdr agent read \(.name) --source recent-unwrapped --lines 80")); answer with: \($lanesh) reply \(.name) \"<answer>\"")
               end
           else empty end),
          (if .agent_status == "blocked" and $p[.pane_id].agent_status != "blocked" then

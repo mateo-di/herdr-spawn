@@ -406,10 +406,12 @@ prepare_launch() {
     promptfile=$goal_dir/brief.md
     local protocol
     protocol=$(cat "$scriptdir/../lane-protocol.md")
+    protocol=${protocol//LANE_SH/$scriptdir/lane.sh}
+    protocol=${protocol//HEAVY_SH/$scriptdir/heavy.sh}
     (
       umask 077
       {
-        printf '%s\n\n## Goal\n\n%s\n\n## Brief\n\n' "${protocol//LANE_SH/$scriptdir/lane.sh}" "$goal" &&
+        printf '%s\n\n## Goal\n\n%s\n\n## Brief\n\n' "$protocol" "$goal" &&
           cat "$callerprompt"
       } >"$promptfile" && chmod 400 "$promptfile"
     ) || die "could not write the brief for $goal_id"
