@@ -36,10 +36,15 @@ report=$stamp
 # Copies the lane's report file into a private per-user directory and prints the copy's path. The directory is
 # made on every call (age-based /tmp cleaning removes it) and must be ours, a real directory and mode 0700.
 store_report() { # <file>
+  local LC_ALL=C
   local src=$1 dir=${HERDR_SPAWN_REPORT_DIR:-/tmp/herdr-spawn-reports-$(id -u)} path size
-  # ASCII only and absolute: the path rides in tab- and space-split fields and herdr's 79 cap counts bytes.
+  # ASCII only (in the C locale, so bytes) and absolute: the path rides in tab- and space-split fields and
+  # herdr's 79 cap counts bytes.
   [[ $dir =~ ^/[A-Za-z0-9._/-]+$ ]] ||
     die "HERDR_SPAWN_REPORT_DIR must be an absolute path of letters, digits and . _ - /: $dir"
+  path=$dir/$stamp.md
+  [ ${#path} -le 79 ] ||
+    die "the report path is ${#path} characters and herdr cuts token values at 79; set HERDR_SPAWN_REPORT_DIR to a shorter directory"
   [ -f "$src" ] && [ -r "$src" ] || die "report file is not a readable regular file: $src"
   [ -s "$src" ] || die "report file is empty: $src"
   size=$(wc -c <"$src") || die "could not read the report file: $src"
@@ -50,9 +55,6 @@ store_report() { # <file>
   [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] &&
     [ -n "$(find "$dir" -prune -perm 0700 -print)" ] ||
     die "the report directory $dir is not private; it must be a real directory owned by you with mode 0700; set HERDR_SPAWN_REPORT_DIR to another directory"
-  path=$dir/$stamp.md
-  [ ${#path} -le 79 ] ||
-    die "the report path is ${#path} characters and herdr cuts token values at 79; set HERDR_SPAWN_REPORT_DIR to a shorter directory"
   (umask 077; cp -- "$src" "$path") 2>/dev/null || die "could not copy the report file to $path"
   chmod 600 -- "$path" 2>/dev/null || die "could not restrict the report copy to mode 600: $path"
   printf '%s\n' "$path"

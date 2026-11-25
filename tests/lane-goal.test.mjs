@@ -266,8 +266,13 @@ for (const surface of ['herdr', 'hc']) {
       assert.rejects(lane(['done', 'a summary', reportFile], { ...inside, HERDR_SPAWN_REPORT_DIR: dir }), pattern);
     await refuseDir('reports', /must be an absolute path/);
     await refuseDir(join(reportDir, 'with space'), /must be an absolute path/);
-    await refuseDir(join(reportDir, 'x'.repeat(60)), /herdr cuts token values at 79/);
+    const longDir = join(reportDir, 'x'.repeat(60));
+    await refuseDir(longDir, /herdr cuts token values at 79/);
+    await assert.rejects(stat(longDir), { code: 'ENOENT' });
     await refuseDir(join(reportFile, 'sub'), /could not create the report directory/);
+    await assert.rejects(
+      lane(['done', 'a summary', reportFile], { ...inside, LC_ALL: 'en_US.UTF-8', HERDR_SPAWN_REPORT_DIR: join(reportDir, 'é') }),
+      /must be an absolute path of letters, digits/);
     assert.equal(await readFile(db, 'utf8'), beforeRefusals);
     assert.equal(await readFile(sentFile, 'utf8'), sentBefore);
 
