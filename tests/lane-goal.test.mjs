@@ -30,13 +30,17 @@ const create = (label, parent) => {
   const tab = parent?.tab ?? 'tab' + seq;
   const id = (basename(process.argv[1]) === 'hc' ? 't' : tab + ':p') + seq;
   db[id] = { id, label, tab, cwd: flag('--cwd'), sources: {}, labels: {},
-    session: process.env.MOCK_NO_SESSION === '1' ? null : 'session-' + seq };
+    session: process.env.MOCK_NO_SESSION === '1' ? null : 'session-' + seq,
+    session_after: Number(process.env.MOCK_SESSION_AFTER) || 0, session_calls: 0 };
   return db[id];
 };
-const pane = row => ({ pane_id: row.id, name: row.name ?? null,
-  tokens: Object.assign({}, ...Object.values(row.sources)),
-  agent: row.label === 'managed' ? 'opencode' : 'claude', agent_status: 'working',
-  agent_session: { value: row.session ?? null } });
+const pane = (row, hidden = false) => {
+  const agent = { pane_id: row.id, name: row.name ?? null,
+    tokens: Object.assign({}, ...Object.values(row.sources)),
+    agent: row.label === 'managed' ? 'opencode' : 'claude', agent_status: 'working' };
+  if (!hidden && row.session) agent.agent_session = { value: row.session };
+  return agent;
+};
 const no = () => process.exit(1);
 switch (basename(process.argv[1])) {
   case 'herdr-app':
@@ -89,11 +93,15 @@ switch (basename(process.argv[1])) {
     switch (a + ' ' + b) {
       case 'agent get': {
         const row = find(c) ?? no();
-        out({ result: { agent: pane(row) } });
+        if (row.session_after) {
+          row.session_calls = (row.session_calls ?? 0) + 1;
+          save();
+        }
+        out({ result: { agent: pane(row, row.session_after > 0 && row.session_calls < row.session_after) } });
         break;
       }
       case 'agent list':
-        out({ result: { agents: Object.values(db).map(pane) } });
+        out({ result: { agents: Object.values(db).map(row => pane(row)) } });
         break;
       case 'pane get':
         out({ result: { pane: pane((db[c] ?? db[c.replace(/^p_(\\d+)$/, 'tab1:p$1')]) ?? no()) } });
@@ -410,10 +418,10 @@ async function restoreFixture(t) {
     XDG_STATE_HOME: state, SHELL: '/bin/bash', WATCH_LOG: watchlog,
     HERDR_SPAWN_CONFIG: join(root, 'agents.conf'), OPENCODE_CONFIG_CONTENT: '',
   };
-  const invoke = (script, args, extra = {}) =>
-    run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
-  const spawn = (name, extra) => invoke('spawn.sh',
-    ['--tab', root, '--lane', 'unit', '--goal', `Objective for ${name}`, 'opencode', name, brief], extra);
+  const invoke = (script, args, extra = {}, timeout = 10_000) =>
+    run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout });
+  const spawn = (name, extra, timeout) => invoke('spawn.sh',
+    ['--tab', root, '--lane', 'unit', '--goal', `Objective for ${name}`, 'opencode', name, brief], extra, timeout);
   const idOf = stdout => stdout.trim().split(' ')[0];
   const rows = async () => JSON.parse(await readFile(db, 'utf8'));
   const setRows = async all => writeFile(db, JSON.stringify(all));
@@ -450,8 +458,17 @@ test('spawn.sh records a restorable TUI lane', async t => {
   });
   assert.equal((await stat(await f.recordFile(id))).mode & 0o777, 0o400);
 
-  const { stdout, stderr } = await f.spawn('nosession', { MOCK_NO_SESSION: '1' });
-  assert.match(stderr, /spawn.sh: lane nosession cannot be restored after a Herdr restart/);
+  // The session reaches the mock on the third agent get; the bounded poll must wait for it.
+  const late = await f.spawn('late', { MOCK_SESSION_AFTER: '3' });
+  const lateId = f.idOf(late.stdout);
+  assert.doesNotMatch(late.stderr, /cannot be restored/);
+  assert.deepEqual(await f.record(lateId), {
+    name: 'late', pane: lateId, lane_of: 'parent', lane_mode: 'unit',
+    agent: 'claude', agent_session: (await f.rows())[lateId].session,
+  });
+
+  const { stdout, stderr } = await f.spawn('nosession', { MOCK_NO_SESSION: '1' }, 15_000);
+  assert.match(stderr, /no agent_session after 5s \(is Herdr's claude integration installed\? see: herdr integration status\)/);
   const noId = f.idOf(stdout);
   assert.equal((await f.rows())[noId].name, 'nosession');
   await assert.rejects(f.record(noId), { code: 'ENOENT' });

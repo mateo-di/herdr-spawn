@@ -597,12 +597,17 @@ fi
 if [ -n "$lane" ]; then
   # A Herdr restart keeps the pane and its conversation but drops the name and tokens. The agent_session survives,
   # so record it here for lane.sh restore; without it the lane cannot be found again, but it is already running.
+  # The agent's Herdr integration reports the session a moment after Herdr detects the agent, so wait for it.
   agent_kind=$(jq -r '.result.agent.agent // empty' <<<"$info")
   session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info")
   if [ -z "$session" ]; then
-    if info2=$(herdr agent get "$pane" 2>/dev/null); then
-      session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info2")
-    fi
+    for _ in $(seq 10); do
+      [ -z "$session" ] || break
+      sleep 0.5
+      if info2=$(herdr agent get "$pane" 2>/dev/null); then
+        session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info2")
+      fi
+    done
   fi
   if [ -n "$session" ]; then
     (
@@ -613,7 +618,7 @@ if [ -n "$lane" ]; then
         >"$goal_dir/lane.json" && chmod 400 "$goal_dir/lane.json"
     ) || echo "spawn.sh: lane $name cannot be restored after a Herdr restart: could not write its record" >&2
   else
-    echo "spawn.sh: lane $name cannot be restored after a Herdr restart: no agent_session" >&2
+    echo "spawn.sh: lane $name cannot be restored after a Herdr restart: no agent_session after 5s (is Herdr's $agent_kind integration installed? see: herdr integration status)" >&2
   fi
 fi
 
