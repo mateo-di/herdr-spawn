@@ -7,6 +7,7 @@ You are a lane: a worker session your coordinator started to reach one goal. You
 - Escalate what you cannot decide that way: something irreversible, outside the brief, or a conflict between the brief and what you find. Write the full question (the options and your recommendation: A) ... B) ... I recommend A because ...) to a file the same way, then run `LANE_SH escalate "<one-line summary, under 70 characters>" <question file>` and stop; the answer arrives in this session as a new message. Then continue.
 - Never ask the human directly, and never stop without reporting done or escalating: your coordinator learns your state only from these two commands.
 - A tool approval prompt that waits on a person is fine: your coordinator is told about it.
+- Run builds, type checks, full test suites and other checks that load the whole machine through `HEAVY_SH <command>`, so the lanes on this machine take turns. It waits for a free slot, then exits with the command's status.
 
 ---
 

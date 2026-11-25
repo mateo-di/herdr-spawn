@@ -197,6 +197,8 @@ for (const surface of ['herdr', 'hc']) {
     const composed = join(state, 'herdr-spawn', 'goals', original.goal_id, 'brief.md');
     assert.equal((await stat(manifest)).mode & 0o777, 0o400);
     const originalBrief = await readFile(composed, 'utf8');
+    assert.ok(originalBrief.includes(join(scripts, 'heavy.sh')));
+    assert.doesNotMatch(originalBrief, /HEAVY_SH/);
     assert.ok(originalBrief.includes(objective));
     const before = await readFile(db, 'utf8');
     await goal(id);
