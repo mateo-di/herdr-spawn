@@ -82,6 +82,8 @@ Pick `driver` when the task has several units; keep a lane to one task so its wo
 herdr agent list | jq '.result.agents[] | select(.tokens.lane_of == env.HERDR_PANE_ID) | {name, agent, agent_status, lane_mode: .tokens.lane_mode, cwd}'
 ```
 
+A Herdr server restart keeps your lanes' panes and conversations but drops their names and tokens, so that table comes back empty and `lane.sh reply` finds no lane. Run `scripts/lane.sh restore`: it finds each lane you spawned by the Herdr agent_session that `spawn.sh` recorded, puts back its name and tokens as `working`, and restarts your watcher. A lane that runs `lane.sh` first restores itself. This works in the herdr TUI only; a restored lane's own `LANE_MODE` stays unset, so a gate that reads it treats the lane as a driver.
+
 In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `lane_mode`, `lane_state` and `lane_report` as hc labels. A root opens in a new tab in your space, named after it only through `herdr-app` on your host (see Layout); a subtask uses the root's space/tab labels, without calling the GUI even remotely. No watcher runs there: `lane.sh done|escalate` sends its notice to you with `hc send`, so it arrives tagged `<hc from="tN name">` and can land mid-turn; hc itself notes a lane that is blocked, errors or exits; the stop hook sends `stopped` when it lets a silent lane stop; there is no `stalled` notice. Read a lane with `hc read <lane> --lines 120`, and list yours with `hc ls` (your children) and `hc get <lane>` (its labels).
 
 ### Coordinating lanes
