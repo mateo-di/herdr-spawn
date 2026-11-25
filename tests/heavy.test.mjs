@@ -76,6 +76,9 @@ const exists = async path => {
   }
 };
 
+// The keeper frees a slot shortly after its command ends, not at once.
+const slotsFreed = dir => waitFor(async () => (await readdir(dir)).length === 0);
+
 const setup = async t => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-heavy-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -93,7 +96,7 @@ test('passes arguments and the exit status through, then frees the slot', async 
     { ...env, MARK: mark });
   assert.equal(run.code, 7);
   assert.equal(await readFile(mark, 'utf8'), 'one argument with spaces\n');
-  await waitFor(async () => (await readdir(dir)).length === 0);
+  await slotsFreed(dir);
 });
 
 test('one slot serializes two runs, which wait once for each other', async t => {
@@ -111,7 +114,7 @@ test('one slot serializes two runs, which wait once for each other', async t => 
   await second.read();
   assert.equal(await readFile(order, 'utf8'), 'after\n');
   assert.equal(second.stderr.match(/all 1 slots are busy; waiting/g)?.length, 1);
-  await waitFor(async () => (await readdir(dir)).length === 0);
+  await slotsFreed(dir);
 });
 
 test('two slots let two runs overlap', async t => {
@@ -154,7 +157,7 @@ test('takes over an abandoned slot', async t => {
   assert.equal(run.code, 0);
   assert.doesNotMatch(run.stderr, /waiting/);
   assert.equal(await readFile(mark, 'utf8'), 'ran\n');
-  await waitFor(async () => (await readdir(dir)).length === 0);
+  await slotsFreed(dir);
 });
 
 test('respects a live slot owned by someone else', async t => {
@@ -179,32 +182,22 @@ test('a killed run frees its slot', async t => {
   await waitFor(() => exists(join(dir, 'slot-1')));
   process.kill(-run.child.pid, 'SIGTERM');
   await finish(run, 5000);
-  await waitFor(async () => (await readdir(dir)).length === 0);
+  await slotsFreed(dir);
 });
 
-test('a TERM to heavy.sh alone ends the command at once', async t => {
-  const { root, dir, env } = await setup(t);
-  const mark = join(root, 'started');
-  const run = startHeavy(['bash', '-c', 'echo started > "$1"; exec sleep 30', 'bash', mark],
-    { ...env, HERDR_SPAWN_HEAVY_SLOTS: '1' });
-  await waitFor(() => exists(mark));
-  process.kill(run.child.pid, 'SIGTERM');
-  await finish(run, 3000);
-  assert.equal(run.signal, 'SIGTERM');
-  await waitFor(async () => (await readdir(dir)).length === 0);
-});
-
-test('frees the slot when the command is killed with SIGKILL', async t => {
-  const { root, dir, env } = await setup(t);
-  const mark = join(root, 'started');
-  const run = startHeavy(['bash', '-c', 'echo started > "$1"; exec sleep 30', 'bash', mark],
-    { ...env, HERDR_SPAWN_HEAVY_SLOTS: '1' });
-  await waitFor(() => exists(mark));
-  process.kill(run.child.pid, 'SIGKILL');
-  await finish(run, 3000);
-  assert.equal(run.signal, 'SIGKILL');
-  await waitFor(async () => (await readdir(dir)).length === 0);
-});
+for (const signal of ['SIGTERM', 'SIGKILL']) {
+  test(`a ${signal} to heavy.sh alone ends the command at once and frees its slot`, async t => {
+    const { root, dir, env } = await setup(t);
+    const mark = join(root, 'started');
+    const run = startHeavy(['bash', '-c', 'echo started > "$1"; exec sleep 30', 'bash', mark],
+      { ...env, HERDR_SPAWN_HEAVY_SLOTS: '1' });
+    await waitFor(() => exists(mark));
+    process.kill(run.child.pid, signal);
+    await finish(run, 3000);
+    assert.equal(run.signal, signal);
+    await slotsFreed(dir);
+  });
+}
 
 test('a run right after another starts without waiting a full poll', async t => {
   const { env } = await setup(t);
