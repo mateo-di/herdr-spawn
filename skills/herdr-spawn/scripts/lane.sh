@@ -50,17 +50,18 @@ start_watcher() { # <coordinator>
 
 # Re-apply a recorded lane's name and tokens to its surviving pane, using one `herdr agent list` snapshot.
 restore_one() { # <lane.json> <agents-json>
-  local record_file=$1 agents=$2 dir record name session count pane goal_mode of mode
+  local record_file=$1 agents=$2 dir record name session count pane holder goal_mode of mode
   dir=${record_file%/*}
   # A lane record is a private, write-once file in a private goal directory.
   [[ ${dir##*/} =~ ^g\.[[:alnum:]]{12}$ ]] || return 0
   [ ! -L "$dir" ] && [ -O "$dir" ] && [ ! -L "$record_file" ] && [ -O "$record_file" ] || return 0
   record=$(jq -c 'select((.name | type) == "string" and (.lane_of | type) == "string"
+    and (.lane_of | test("^[A-Za-z0-9_:.-]+$"))
     and (.lane_mode | type) == "string" and (.lane_mode == "unit" or .lane_mode == "driver"))' \
     "$record_file" 2>/dev/null) || record=
   [ -n "$record" ] || return 0
   name=$(jq -r '.name' <<<"$record")
-  if jq -e --arg name "$name" 'any(.result.agents[]?; .name == $name)' <<<"$agents" >/dev/null; then
+  if jq -e --arg name "$name" 'any(.result.agents[]?; .name == $name and (.tokens.lane_of // "") != "")' <<<"$agents" >/dev/null; then
     echo "$name: present"
     touched=1
     return 0
@@ -77,11 +78,19 @@ restore_one() { # <lane.json> <agents-json>
     *) echo "$name: ambiguous, $count panes share its session"; return 0 ;;
   esac
   [ -n "$pane" ] || return 0
+  holder=$(jq -r --arg n "$name" --arg p "$pane" '[.result.agents[]? | select(.name == $n and .pane_id != $p)][0].pane_id // empty' <<<"$agents")
+  if [ -n "$holder" ]; then
+    echo "$name: cannot restore, pane $holder holds the name"
+    return 0
+  fi
   goal_mode=$(jq -r '.goal_mode // empty' "$dir/goal.json" 2>/dev/null) || goal_mode=
   [ -n "$goal_mode" ] || return 0
   of=$(jq -r '.lane_of' <<<"$record")
   mode=$(jq -r '.lane_mode' <<<"$record")
-  herdr agent rename "$pane" "$name" >/dev/null || die "could not rename $pane to $name"
+  # A half-restored pane that kept its name only lost its tokens; renaming it to itself would be a needless call.
+  if [ "$(jq -r --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p) | .name // ""][0] // ""' <<<"$agents")" != "$name" ]; then
+    herdr agent rename "$pane" "$name" >/dev/null || die "could not rename $pane to $name"
+  fi
   herdr pane report-metadata "$pane" --source herdr-spawn-goal --token "goal_id=${dir##*/}" \
     --token "goal_mode=$goal_mode" --token goal_startup=ready >/dev/null ||
     die "could not record goal metadata on $pane"
@@ -230,11 +239,13 @@ fi
 # from this pane, or restore them from the record spawn.sh left, before the usual "is not set" checks. A lane with
 # both exports set never calls herdr here.
 if [ "$cmd" = "done" ] || [ "$cmd" = escalate ] || [ "$cmd" = working ]; then
+  fallback=0
   if { [ -z "${LANE_COORDINATOR:-}" ] || [ -z "${LANE_MODE:-}" ]; } && [ -n "${HERDR_PANE_ID:-}" ]; then
+    fallback=1
     info=$(herdr agent get "$HERDR_PANE_ID" 2>/dev/null) || info=
     if [ -n "$info" ]; then
       read -r of mode < <(jq -r '.result.agent | "\(.tokens.lane_of // "-") \(.tokens.lane_mode // "-")"' <<<"$info") || of=-
-      if [ "$of" != - ] && [ "$mode" != - ]; then
+      if [[ $of =~ ^[A-Za-z0-9_:.-]+$ ]] && { [ "$mode" = unit ] || [ "$mode" = driver ]; }; then
         LANE_COORDINATOR=$of LANE_MODE=$mode
       else
         session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info")
@@ -263,6 +274,9 @@ if [ "$cmd" = "done" ] || [ "$cmd" = escalate ] || [ "$cmd" = working ]; then
         fi
       fi
     fi
+  fi
+  if [ "$fallback" = 1 ] && { [ -z "${LANE_COORDINATOR:-}" ] || [ -z "${LANE_MODE:-}" ]; }; then
+    die "pane $HERDR_PANE_ID has no lane tokens and no single lane record matches its agent_session; if Herdr restarted, ask your coordinator to run lane.sh restore, otherwise spawn with --lane"
   fi
 fi
 

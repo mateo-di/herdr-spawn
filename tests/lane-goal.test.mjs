@@ -605,8 +605,46 @@ test('in-lane done fails without tokens or a lane record', async t => {
   await rm(file);
   await f.clearWatch();
   await assert.rejects(f.invoke('lane.sh', ['done', 'nothing'],
-    { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' }), /LANE_COORDINATOR is not set/);
+    { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' }), /has no lane tokens and no single lane record/);
   assert.deepEqual((await f.rows())[id].sources, {});
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('lane.sh restore gives tokens back to a pane that kept its name', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  await f.forget(id);
+  const all = await f.rows();
+  all[id].name = 'managed';
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: restored on ${id}`));
+  const row = (await f.rows())[id];
+  assert.equal(row.name, 'managed');
+  assert.equal(row.sources['herdr-spawn'].lane_of, 'parent');
+  assert.equal(row.sources['herdr-spawn'].lane_state, 'working');
+  assert.match(await f.settledWatch(), /lanes-watch.sh parent/);
+});
+
+test('lane.sh restore does not take a name another pane holds', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, pane ${y} holds the name`));
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+  assert.equal(after[y].name, 'managed');
   await f.pause();
   assert.equal(await f.watch(), '');
 });

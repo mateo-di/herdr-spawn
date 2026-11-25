@@ -49,7 +49,7 @@ async function fixture(t) {
 
 test('lane-stop-check treats a TUI pane with a lane_mode token as a lane', async t => {
   const f = await fixture(t);
-  await f.setDb({ pane: { lane_mode: 'unit', lane_state: 'working', lane_report: 'r1' }, agents: [] });
+  await f.setDb({ pane: { lane_of: 'coord', lane_mode: 'unit', lane_state: 'working', lane_report: 'r1' }, agents: [] });
   const { stdout } = await f.runCheck();
   assert.match(stdout, /^You are a lane and have not reported yet\./);
 });
@@ -66,4 +66,12 @@ test('lane-stop-check uses LANE_MODE when the pane has no lane_mode token', asyn
   await f.setDb({ pane: { lane_state: 'working', lane_report: 'r1' }, agents: [] });
   const { stdout } = await f.runCheck({ LANE_MODE: 'unit' });
   assert.match(stdout, /^You are a lane and have not reported yet\./);
+});
+
+test('lane-stop-check ignores a TUI pane without lane_of or with an unknown lane_mode', async t => {
+  const f = await fixture(t);
+  await f.setDb({ pane: { lane_of: 'coord', lane_mode: 'x', lane_state: 'working' }, agents: [] });
+  assert.equal((await f.runCheck()).stdout, '');
+  await f.setDb({ pane: { lane_mode: 'unit', lane_state: 'working' }, agents: [] });
+  assert.equal((await f.runCheck()).stdout, '');
 });

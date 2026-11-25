@@ -13,7 +13,7 @@
 #             completion_seq counter not rising); once per stretch.
 #   blocked   a lane entered blocked (first seen blocked included).
 #   exited    a lane's pane vanished.
-#   lost      a lane's name and lane tokens vanished but its pane is still open (a Herdr restart); restore it.
+#   lost      a lane's name and lane tokens vanished but its pane still runs an agent (a Herdr restart); restore it.
 # The last snapshot, with the stall and idle bookkeeping, persists per coordinator, so a restarted watcher does not
 # re-announce what it reported.
 # Notices queue in the state dir and are posted to the coordinator with `herdr agent prompt` only while it is
@@ -104,7 +104,7 @@ events() {
           else empty end)),
       ($prev[] | select(.pane_id as $id | $alive | index($id) | not)
        | if (.pane_id as $id | $open | index($id)) then
-           row("lost"; "[lane \(.name)] lost its name and lane tokens, but pane \(.pane_id) is still open (a Herdr restart does this). Restore it with: \($lanesh) restore")
+           row("lost"; "[lane \(.name)] lost its name and lane tokens, but pane \(.pane_id) still runs an agent (a Herdr restart does this). Restore it with: \($lanesh) restore")
          else
            row("exited"; "[lane \(.name)] exited \(where).")
          end)'
@@ -158,17 +158,13 @@ while :; do
     continue
   fi
   failures=0
-  if cur=$(herdr agent list 2>/dev/null | jq -c --arg c "$coord" '
+  if raw=$(herdr agent list 2>/dev/null) && cur=$(jq -c --arg c "$coord" '
       [.result.agents[] | select(.tokens.lane_of == $c)
-       | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode, state: .tokens.lane_state, note: .tokens.lane_note, report: .tokens.lane_report}]') &&
+       | {name, pane_id, agent, agent_status, completion_seq, mode: .tokens.lane_mode, state: .tokens.lane_state, note: .tokens.lane_note, report: .tokens.lane_report}]' <<<"$raw") &&
      [ -n "$cur" ] && cur=$(track "$prev" "$cur" "$(date +%s)"); then
-    # A lane missing from the snapshot may only have lost its tokens in a Herdr restart; ask herdr which panes
-    # are still open before deciding it exited. Only one call per snapshot, and only when it could matter.
-    open='[]'
-    if jq -ne --argjson prev "$prev" --argjson cur "$cur" '
-        ($cur | map(.pane_id)) as $alive | any($prev[]; .pane_id as $id | $alive | index($id) | not)' >/dev/null; then
-      open=$(herdr pane list 2>/dev/null | jq -c '[.result.panes[].pane_id]') || open='[]'
-    fi
+    # A lane missing from the snapshot whose pane still lists an agent only lost its name and tokens (a Herdr
+    # restart resumes the agent); a pane left open by an agent that quit lists none, so that lane exited.
+    open=$(jq -c '[.result.agents[].pane_id]' <<<"$raw")
     while IFS=$'\t' read -r kind name pane report notice; do
       [ -n "$kind" ] || continue
       printf '%s\t%s\t%s\t%s\n' "$kind" "$pane" "$report" "$notice" >>"$queue"
