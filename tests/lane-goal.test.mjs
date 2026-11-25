@@ -611,6 +611,81 @@ test('in-lane done fails without tokens or a lane record', async t => {
   assert.equal(await f.watch(), '');
 });
 
+test('in-lane done rejects pane tokens that do not name a coordinator and mode', async t => {
+  for (const tokens of [{ lane_mode: 'unit' }, { lane_of: 'w1:p1', lane_mode: 'x' }]) {
+    const f = await restoreFixture(t);
+    const id = f.idOf((await f.spawn('managed')).stdout);
+    const file = await f.recordFile(id);
+    await f.forget(id);
+    await rm(file);
+    const all = await f.rows();
+    all[id].sources['herdr-spawn'] = tokens;
+    await f.setRows(all);
+    await assert.rejects(f.invoke('lane.sh', ['done', 'nothing'],
+      { HERDR_PANE_ID: id, LANE_COORDINATOR: '', LANE_MODE: '' }), /has no lane tokens and no single lane record/);
+    assert.deepEqual((await f.rows())[id].sources['herdr-spawn'], tokens);
+  }
+});
+
+test('lane.sh restore does not treat another coordinator\'s same-named lane as present', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  all[y].sources['herdr-spawn'] = { lane_of: 'elsewhere', lane_mode: 'unit' };
+  await f.setRows(all);
+  await f.clearWatch();
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, pane ${y} holds the name`));
+  assert.doesNotMatch(stdout, /present/);
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('in-lane self-restore reports a name another pane holds', async t => {
+  const f = await restoreFixture(t);
+  const x = f.idOf((await f.spawn('managed')).stdout);
+  const y = f.idOf((await f.spawn('squatter')).stdout);
+  await rm(await f.recordFile(y));
+  await f.forget(x);
+  await f.forget(y);
+  const all = await f.rows();
+  all[y].name = 'managed';
+  await f.setRows(all);
+  await f.clearWatch();
+  await assert.rejects(f.invoke('lane.sh', ['done', 'nothing'],
+    { HERDR_PANE_ID: x, LANE_COORDINATOR: '', LANE_MODE: '' }), err => {
+    assert.match(err.stdout, new RegExp(`pane ${y} holds the name`));
+    return true;
+  });
+  const after = await f.rows();
+  assert.equal(after[x].name, undefined);
+  assert.deepEqual(after[x].sources, {});
+  await f.pause();
+  assert.equal(await f.watch(), '');
+});
+
+test('lane.sh restore says when goal.json has no goal_mode', async t => {
+  const f = await restoreFixture(t);
+  const id = f.idOf((await f.spawn('managed')).stdout);
+  const gid = await f.goalId(id);
+  const manifest = join(f.goals, gid, 'goal.json');
+  await chmod(manifest, 0o600);
+  const { goal_mode: _, ...rest } = JSON.parse(await readFile(manifest, 'utf8'));
+  await writeFile(manifest, JSON.stringify(rest));
+  await f.forget(id);
+  const { stdout } = await f.invoke('lane.sh', ['restore']);
+  assert.match(stdout, new RegExp(`managed: cannot restore, no goal_mode in .*${gid}/goal.json`));
+  assert.equal((await f.rows())[id].name, undefined);
+});
+
 test('lane.sh restore gives tokens back to a pane that kept its name', async t => {
   const f = await restoreFixture(t);
   const id = f.idOf((await f.spawn('managed')).stdout);
@@ -666,6 +741,7 @@ test('lane.sh restore skips symlinked goal directories and lane records', async 
   await f.clearWatch();
   const { stdout } = await f.invoke('lane.sh', ['restore']);
   assert.doesNotMatch(stdout, /restored on/);
+  assert.match(stdout, /lane\.json: skipped, not a valid lane record/);
   const all = await f.rows();
   assert.equal(all[dirPane].name, undefined);
   assert.equal(all[filePane].name, undefined);

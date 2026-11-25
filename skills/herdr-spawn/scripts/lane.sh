@@ -54,14 +54,21 @@ restore_one() { # <lane.json> <agents-json>
   dir=${record_file%/*}
   # A lane record is a private, write-once file in a private goal directory.
   [[ ${dir##*/} =~ ^g\.[[:alnum:]]{12}$ ]] || return 0
-  [ ! -L "$dir" ] && [ -O "$dir" ] && [ ! -L "$record_file" ] && [ -O "$record_file" ] || return 0
+  if ! { [ ! -L "$dir" ] && [ -O "$dir" ] && [ ! -L "$record_file" ] && [ -O "$record_file" ]; }; then
+    echo "$record_file: skipped, not a valid lane record"
+    return 0
+  fi
   record=$(jq -c 'select((.name | type) == "string" and (.lane_of | type) == "string"
-    and (.lane_of | test("^[A-Za-z0-9_:.-]+$"))
+    and (.lane_of | test("^[A-Za-z0-9][A-Za-z0-9_:.-]*$"))
     and (.lane_mode | type) == "string" and (.lane_mode == "unit" or .lane_mode == "driver"))' \
     "$record_file" 2>/dev/null) || record=
-  [ -n "$record" ] || return 0
+  if [ -z "$record" ]; then
+    echo "$record_file: skipped, not a valid lane record"
+    return 0
+  fi
   name=$(jq -r '.name' <<<"$record")
-  if jq -e --arg name "$name" 'any(.result.agents[]?; .name == $name and (.tokens.lane_of // "") != "")' <<<"$agents" >/dev/null; then
+  of=$(jq -r '.lane_of' <<<"$record")
+  if jq -e --arg name "$name" --arg of "$of" 'any(.result.agents[]?; .name == $name and .tokens.lane_of == $of)' <<<"$agents" >/dev/null; then
     echo "$name: present"
     touched=1
     return 0
@@ -84,8 +91,10 @@ restore_one() { # <lane.json> <agents-json>
     return 0
   fi
   goal_mode=$(jq -r '.goal_mode // empty' "$dir/goal.json" 2>/dev/null) || goal_mode=
-  [ -n "$goal_mode" ] || return 0
-  of=$(jq -r '.lane_of' <<<"$record")
+  if [ -z "$goal_mode" ]; then
+    echo "$name: cannot restore, no goal_mode in $dir/goal.json"
+    return 0
+  fi
   mode=$(jq -r '.lane_mode' <<<"$record")
   # A half-restored pane that kept its name only lost its tokens; renaming it to itself would be a needless call.
   if [ "$(jq -r --arg p "$pane" '[.result.agents[]? | select(.pane_id == $p) | .name // ""][0] // ""' <<<"$agents")" != "$name" ]; then
@@ -245,7 +254,7 @@ if [ "$cmd" = "done" ] || [ "$cmd" = escalate ] || [ "$cmd" = working ]; then
     info=$(herdr agent get "$HERDR_PANE_ID" 2>/dev/null) || info=
     if [ -n "$info" ]; then
       read -r of mode < <(jq -r '.result.agent | "\(.tokens.lane_of // "-") \(.tokens.lane_mode // "-")"' <<<"$info") || of=-
-      if [[ $of =~ ^[A-Za-z0-9_:.-]+$ ]] && { [ "$mode" = unit ] || [ "$mode" = driver ]; }; then
+      if [[ $of =~ ^[A-Za-z0-9][A-Za-z0-9_:.-]*$ ]] && { [ "$mode" = unit ] || [ "$mode" = driver ]; }; then
         LANE_COORDINATOR=$of LANE_MODE=$mode
       else
         session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info")
@@ -259,16 +268,15 @@ if [ "$cmd" = "done" ] || [ "$cmd" = escalate ] || [ "$cmd" = working ]; then
             match=$record
             count=$((count + 1))
           done
-          if [ "$count" -eq 1 ]; then
+          agents=$(herdr agent list 2>/dev/null) || agents=
+          if [ "$count" -eq 1 ] && [ -n "$agents" ]; then
             touched=0
-            restore_one "$match" "$(jq -c '{result: {agents: [.result.agent]}}' <<<"$info")"
+            restore_one "$match" "$agents"
             if [ "$touched" = 1 ]; then
               of=$(jq -r '.lane_of // empty' "$match")
               mode=$(jq -r '.lane_mode // empty' "$match")
-              if [ -n "$of" ] && [ -n "$mode" ]; then
-                start_watcher "$of"
-                LANE_COORDINATOR=$of LANE_MODE=$mode
-              fi
+              start_watcher "$of"
+              LANE_COORDINATOR=$of LANE_MODE=$mode
             fi
           fi
         fi

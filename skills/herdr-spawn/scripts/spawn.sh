@@ -600,15 +600,13 @@ if [ -n "$lane" ]; then
   # The agent's Herdr integration reports the session a moment after Herdr detects the agent, so wait for it.
   agent_kind=$(jq -r '.result.agent.agent // empty' <<<"$info")
   session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info")
-  if [ -z "$session" ]; then
-    for _ in $(seq 10); do
-      [ -z "$session" ] || break
-      sleep 0.5
-      if info2=$(herdr agent get "$pane" 2>/dev/null); then
-        session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info2")
-      fi
-    done
-  fi
+  for _ in $(seq 10); do
+    [ -z "$session" ] || break
+    sleep 0.5
+    if info2=$(herdr agent get "$pane" 2>/dev/null); then
+      session=$(jq -r '.result.agent.agent_session.value // empty' <<<"$info2")
+    fi
+  done
   if [ -n "$session" ]; then
     (
       umask 077

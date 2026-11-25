@@ -51,7 +51,7 @@ async function waitForFile(path, timeout = 10_000) {
   assert.fail(`Timed out waiting for ${path}`);
 }
 
-async function fixture(t, agents) {
+async function fixture(t, agents, queued) {
   const root = await mkdtemp(join(tmpdir(), 'lanes-watch-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const herdr = join(root, 'herdr');
@@ -61,6 +61,7 @@ async function fixture(t, agents) {
   const state = join(stateRoot, 'herdr-spawn');
   await mkdir(state, { recursive: true });
   await writeFile(join(state, 'seen-coord.json'), JSON.stringify(previous));
+  if (queued) await writeFile(join(state, 'queue-coord.txt'), queued);
   const agentList = join(root, 'agents.json');
   const prompt = join(root, 'prompt.txt');
   await writeFile(agentList, JSON.stringify(agents));
@@ -90,6 +91,18 @@ test('lanes whose agents exited are exited, not lost', async t => {
   const { prompt } = await fixture(t, none);
   const text = await waitForFile(prompt);
   assert.match(text, /\[lane kept\] exited/);
+  assert.match(text, /\[lane gone\] exited/);
+  assert.doesNotMatch(text, /lost its name/);
+});
+
+test('a queued lost notice is dropped once the lane is back in the snapshot', async t => {
+  const back = { result: { agents: [
+    { name: 'kept', pane_id: 'w1:p2', agent: 'claude', agent_status: 'working', completion_seq: 0,
+      tokens: { lane_of: 'coord', lane_mode: 'unit', lane_state: 'working' } },
+  ] } };
+  const queued = '[lane kept] lost its name and lane tokens, but pane w1:p2 still runs an agent';
+  const { prompt } = await fixture(t, back, `lost\tw1:p2\t-\t${queued}\n`);
+  const text = await waitForFile(prompt);
   assert.match(text, /\[lane gone\] exited/);
   assert.doesNotMatch(text, /lost its name/);
 });
