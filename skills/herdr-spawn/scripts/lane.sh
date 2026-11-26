@@ -15,8 +15,9 @@
 # Herdr restart drops the names, tokens and the lane's LANE_* exports, so restore re-applies them in the
 # coordinator, and a lane without the exports reads its pane tokens or restores itself from that record.
 # In the Herdr app (HERDR_ENV not 1, HC_TERMINAL_ID set) the same state lives in hc labels on the lane's terminal.
-# No watcher runs there, so done and escalate send the notice to the coordinator themselves, and hc notes the
-# parent when a child is blocked, errors or exits. Needs HC_TERMINAL_ID, LANE_COORDINATOR and LANE_MODE in a lane.
+# No watcher runs there, so done and escalate send the notice to the coordinator themselves (or queue it for a
+# detached deliverer when the coordinator is busy), and hc notes the parent when a child is blocked, errors or exits.
+# Needs HC_TERMINAL_ID, LANE_COORDINATOR and LANE_MODE in a lane.
 set -euo pipefail
 
 die() { echo "lane.sh: $*" >&2; exit 1; }
@@ -278,13 +279,22 @@ if [ "$app" = 1 ]; then
   else
     msg="[lane $name] escalation: $n. Read the full question: $report; answer with: $here/lane.sh reply $name \"<answer>\""
   fi
-  if ! hc send "$LANE_COORDINATOR" -- "$msg" >/dev/null; then
-    hc label "$HC_TERMINAL_ID" "lane_state=$(jq -r '.labels.lane_state // "working"' <<<"$info")" \
-      "lane_report=$(jq -r '.labels.lane_report // ""' <<<"$info")" \
-      "lane_note=$(jq -r '.labels.lane_note // ""' <<<"$info")" >/dev/null || true
-    die "the coordinator $LANE_COORDINATOR did not take the notice (blocked or gone?); lane_state is unchanged, run lane.sh $cmd again"
+  if hc send "$LANE_COORDINATOR" -- "$msg" >/dev/null; then
+    printf 'lane.sh: stored the report at %s\n' "$report"
+    exit 0
   fi
-  printf 'lane.sh: stored the report at %s\n' "$report"
+  # Coordinator busy or gone: keep the new labels and queue the notice for a detached deliverer.
+  mkdir -p "$statedir"
+  if [ "$cmd" = escalate ]; then kind=escalation; else kind="done"; fi
+  msg_q=$(printf '%s' "$msg" | tr '\t\n\r' '   ')
+  key=${LANE_COORDINATOR//[!A-Za-z0-9_-]/_}
+  printf '%s\t%s\t%s\t%s\n' "$kind" "$HC_TERMINAL_ID" "$report" "$msg_q" >>"$statedir/app-queue-$key.txt"
+  coord=$LANE_COORDINATOR
+  detach="nohup"
+  if command -v setsid >/dev/null; then detach="setsid"; fi
+  "$detach" "$here/lanes-deliver.sh" "$coord" \
+    >>"$statedir/deliver-$key.log" 2>&1 </dev/null &
+  printf 'lane.sh: stored the report at %s; %s is busy, so the notice is queued and goes out when it can take it\n' "$report" "$LANE_COORDINATOR"
   exit 0
 fi
 
