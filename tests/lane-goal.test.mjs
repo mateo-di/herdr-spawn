@@ -463,6 +463,16 @@ for (const surface of ['herdr', 'hc']) {
     await assert.rejects(lane(['goal', id]), /has no goal manifest/);
     await assert.rejects(start(['--subtask-of', id, '--goal', 'Invalid parent'], 'claude', 'rejected'), /not a ready lane|goal manifest/);
     await lane(['working'], inside);
+
+    // A root lane that came up on a dialog is still a real lane, so its subtasks can be accepted.
+    {
+      const blockedRoot = await rows();
+      if (surface === 'hc') blockedRoot[rootId].labels['goal_startup'] = 'blocked';
+      else blockedRoot[rootId].sources['herdr-spawn-goal'].goal_startup = 'blocked';
+      await writeFile(db, JSON.stringify(blockedRoot));
+    }
+    await start([...subOpts, '--task', 'simple'], 'claude', 'sub-blocked-root');
+    assert.equal((await goal('sub-blocked-root')).parent_lane, rootId);
   });
 }
 

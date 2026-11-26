@@ -279,11 +279,20 @@ if [ "$app" = 1 ]; then
   else
     msg="[lane $name] escalation: $n. Read the full question: $report; answer with: $here/lane.sh reply $name \"<answer>\""
   fi
-  if hc send "$LANE_COORDINATOR" -- "$msg" >/dev/null; then
+  sendrc=0
+  hc send "$LANE_COORDINATOR" -- "$msg" >/dev/null || sendrc=$?
+  if [ "$sendrc" -eq 0 ]; then
     printf 'lane.sh: stored the report at %s\n' "$report"
     exit 0
   fi
-  # Coordinator busy or gone: keep the new labels and queue the notice for a detached deliverer.
+  if [ "$sendrc" -ne 9 ]; then
+    hc label "$HC_TERMINAL_ID" "lane_state=$(jq -r '.labels.lane_state // "working"' <<<"$info")" \
+      "lane_report=$(jq -r '.labels.lane_report // ""' <<<"$info")" \
+      "lane_note=$(jq -r '.labels.lane_note // ""' <<<"$info")" >/dev/null || true
+    die "the coordinator $LANE_COORDINATOR did not take the notice (blocked or gone?); lane_state is unchanged, run lane.sh $cmd again"
+  fi
+  # Coordinator refused (blocked) and keeps the new labels: queue the notice for a detached deliverer.
+  umask 077
   mkdir -p "$statedir"
   if [ "$cmd" = escalate ]; then kind=escalation; else kind="done"; fi
   msg_q=$(printf '%s' "$msg" | tr '\t\n\r' '   ')

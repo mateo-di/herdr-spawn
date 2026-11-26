@@ -18,6 +18,7 @@ key=${coord//[!A-Za-z0-9_-]/_}
 lock=$state/deliver-$key.lock
 queue=$state/app-queue-$key.txt
 logfile=$state/deliver-$key.log
+umask 077
 mkdir -p "$state"
 
 # A live pid in the lock means another deliverer owns this coordinator.
@@ -34,9 +35,16 @@ echo $$ >"$lock/pid"
 trap 'rm -rf "$lock"' EXIT
 trap 'exit 0' INT TERM
 
+# This deliverer now holds the lock, so any in-flight file left behind by a deliverer that died mid-send is orphaned.
+for f in "$state"/app-queue-"$key".txt.sending.*; do
+  [ -e "$f" ] || continue
+  cat "$f" >>"$queue"
+  rm -f "$f"
+done
+
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$logfile"; }
 
-failures=0
+failures=0 sendfails=0
 while :; do
   # A queue that is missing or empty: release the lock, then check once more in case a lane
   # appended and started a deliverer while this one was exiting.
@@ -64,8 +72,14 @@ while :; do
     continue
   else
     st=$(printf '%s' "$info" | jq -r '.state // empty' 2>/dev/null || true)
-    if [ "$st" != "live" ]; then
+    if [ "$st" = "finished" ]; then
       gone=1
+    elif [ "$st" != "live" ]; then
+      failures=$((failures + 1))
+      log "hc get $coord failed ($failures)"
+      if [ $((failures * interval)) -ge 300 ]; then log "giving up after $failures failures"; exit 1; fi
+      sleep "$interval" & wait $!
+      continue
     fi
   fi
 
@@ -100,19 +114,43 @@ while :; do
     line=${lines[$i]}
     IFS=$'\t' read -r kind lane report msg <<<"$line"
     if [ "$kind" = "escalation" ]; then
-      laneinfo=$(hc get "$lane" --json 2>/dev/null) || laneinfo=
+      lrc=0
+      laneinfo=$(hc get "$lane" --json 2>/dev/null) || lrc=$?
+      if [ $lrc -eq 3 ]; then
+        # The lane is gone; nobody waits for its escalation.
+        log "lane $lane is gone for queued escalation"
+        i=$((i + 1))
+        continue
+      fi
+      if [ $lrc -ne 0 ]; then
+        # Retryable: put this line and every unsent line back on the queue.
+        j=$i
+        while [ $j -lt ${#lines[@]} ]; do
+          printf '%s\n' "${lines[$j]}" >>"$queue"
+          j=$((j + 1))
+        done
+        break
+      fi
       ls_state=$(printf '%s' "$laneinfo" | jq -r '.labels.lane_state // empty' 2>/dev/null || true)
       ls_report=$(printf '%s' "$laneinfo" | jq -r '.labels.lane_report // empty' 2>/dev/null || true)
       if [ "$ls_state" != "escalated" ] || [ "$ls_report" != "$report" ]; then
         # Stale: the coordinator already answered, or the lane moved on.
+        log "dropped stale escalation on $lane"
         i=$((i + 1))
         continue
       fi
     fi
-    if HC_TERMINAL_ID="$lane" hc send "$coord" -- "$msg" >/dev/null 2>&1; then
+    sendrc=0
+    senderr=$(HC_TERMINAL_ID="$lane" hc send "$coord" -- "$msg" 2>&1 >/dev/null) || sendrc=$?
+    if [ "$sendrc" -eq 0 ]; then
+      sendfails=0
       log "delivered: $msg"
       i=$((i + 1))
     else
+      if [ "$sendrc" -ne 9 ]; then
+        sendfails=$((sendfails + 1))
+      fi
+      log "send to $coord failed ($sendrc): $senderr"
       # Put this line and every line not yet sent back on the queue.
       j=$i
       while [ $j -lt ${#lines[@]} ]; do
@@ -124,6 +162,7 @@ while :; do
   done
 
   rm -f "$sending"
+  if [ $((sendfails * interval)) -ge 300 ]; then log "giving up after $sendfails failed sends"; exit 1; fi
 
   sleep "$interval" & wait $!
 done

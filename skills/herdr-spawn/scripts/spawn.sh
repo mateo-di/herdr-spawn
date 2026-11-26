@@ -314,7 +314,7 @@ resolve_parent_lane() {
   fi
   required=$(jq -ec --arg coordinator "$coordinator" '
     select((.id | strings | test("^[^-[:space:]][^[:space:]]*$"))
-      and .meta.lane_of == $coordinator and .meta.goal_startup == "ready")
+      and .meta.lane_of == $coordinator and (.meta.goal_startup == "ready" or .meta.goal_startup == "blocked"))
   ' <<<"$root") || die "$root_ref is not a ready lane of the caller"
   parent_lane=$(jq -r '.id' <<<"$required")
   ref=$(jq -r '.meta.goal_id // empty' <<<"$required")
