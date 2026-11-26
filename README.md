@@ -90,7 +90,7 @@ Inspect a lane's original objective and current status with `scripts/lane.sh goa
 }
 ```
 
-Built-in OpenCode is `managed`; built-in Codex, Claude, and oh-my-pi are `native`; any overridden template is `custom`. `goal_status` follows lane state (`active`, `escalated`, `done`) and can also show `pending` or `failed` during startup, before the lane explicitly reports. Only built-in Codex currently verifies native goal startup. For Claude, oh-my-pi, and custom templates, `goal_verification` is `unverified`: `active` describes the lane lifecycle, not proof that the harness accepted a native goal.
+Built-in OpenCode is `managed`; built-in Codex, Claude, and oh-my-pi are `native`; any overridden template is `custom`. `goal_status` follows lane state (`active`, `escalated`, `done`) and can also show `pending`, `failed`, or `blocked` during startup, before the lane explicitly reports. `blocked` means the lane's agent came up waiting on a dialog (such as a folder-trust prompt) that the user must answer in its terminal or pane; `spawn.sh` then prints its usual line, leaves the lane open and exits 3. Only built-in Codex currently verifies native goal startup. For Claude, oh-my-pi, and custom templates, `goal_verification` is `unverified`: `active` describes the lane lifecycle, not proof that the harness accepted a native goal.
 
 A lane declares its state with `scripts/lane.sh`, which sets a `lane_state` pane token (`--lane` starts it at `working`):
 

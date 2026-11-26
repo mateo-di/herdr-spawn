@@ -204,7 +204,7 @@ if [ "$cmd" = goal ]; then
         elif .goal_mode == "native" and .agent == "codex" and .goal_startup == "ready" then "verified"
         else "unverified" end)
     | .goal_status = (if $meta.lane_state == "done" or $meta.lane_state == "escalated" then $meta.lane_state
-        elif (.goal_startup == "pending" or .goal_startup == "failed")
+        elif (.goal_startup == "pending" or .goal_startup == "failed" or .goal_startup == "blocked")
           and ($meta.lane_report == ("start-" + .goal_id) or $meta.lane_report == null) then .goal_startup
         elif $meta.lane_state == "working" then "active"
         else "unknown" end)
