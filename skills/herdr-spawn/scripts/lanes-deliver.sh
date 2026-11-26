@@ -50,37 +50,21 @@ while :; do
     continue
   fi
 
-  errfile=$state/deliver-$key.err
   rc=0
-  info=$(hc get "$coord" --json 2>"$errfile") || rc=$?
-  err=$(cat "$errfile" 2>/dev/null || true)
-  rm -f "$errfile"
+  info=$(hc get "$coord" --json 2>/dev/null) || rc=$?
 
   gone=0
-  if [ $rc -ne 0 ]; then
-    if printf '%s %s' "$err" "$info" | grep -qiE 'not[ _-]?found|no terminal'; then
-      gone=1
-    else
-      failures=$((failures + 1))
-      log "hc get $coord failed ($failures): $err"
-      if [ $((failures * interval)) -ge 300 ]; then log "giving up after $failures failures"; exit 1; fi
-      sleep "$interval" & wait $!
-      continue
-    fi
+  if [ $rc -eq 3 ]; then
+    gone=1
+  elif [ $rc -ne 0 ]; then
+    failures=$((failures + 1))
+    log "hc get $coord failed ($failures)"
+    if [ $((failures * interval)) -ge 300 ]; then log "giving up after $failures failures"; exit 1; fi
+    sleep "$interval" & wait $!
+    continue
   else
-    kind=$(printf '%s' "$info" | jq -r '.error.kind // empty' 2>/dev/null || true)
     st=$(printf '%s' "$info" | jq -r '.state // empty' 2>/dev/null || true)
-    if [ -n "$kind" ]; then
-      if printf '%s' "$kind" | grep -qiE 'not[ _-]?found|no terminal'; then
-        gone=1
-      else
-        failures=$((failures + 1))
-        log "hc get $coord failed ($failures): $kind"
-        if [ $((failures * interval)) -ge 300 ]; then log "giving up after $failures failures"; exit 1; fi
-        sleep "$interval" & wait $!
-        continue
-      fi
-    elif [ "$st" != "live" ]; then
+    if [ "$st" != "live" ]; then
       gone=1
     fi
   fi

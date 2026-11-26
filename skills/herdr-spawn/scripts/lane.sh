@@ -289,10 +289,9 @@ if [ "$app" = 1 ]; then
   msg_q=$(printf '%s' "$msg" | tr '\t\n\r' '   ')
   key=${LANE_COORDINATOR//[!A-Za-z0-9_-]/_}
   printf '%s\t%s\t%s\t%s\n' "$kind" "$HC_TERMINAL_ID" "$report" "$msg_q" >>"$statedir/app-queue-$key.txt"
-  coord=$LANE_COORDINATOR
   detach="nohup"
   if command -v setsid >/dev/null; then detach="setsid"; fi
-  "$detach" "$here/lanes-deliver.sh" "$coord" \
+  "$detach" "$here/lanes-deliver.sh" "$LANE_COORDINATOR" \
     >>"$statedir/deliver-$key.log" 2>&1 </dev/null &
   printf 'lane.sh: stored the report at %s; %s is busy, so the notice is queued and goes out when it can take it\n' "$report" "$LANE_COORDINATOR"
   exit 0
