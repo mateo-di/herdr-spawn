@@ -123,7 +123,9 @@ while :; do
         continue
       fi
       if [ $lrc -ne 0 ]; then
-        # Retryable: put this line and every unsent line back on the queue.
+        # Retryable: put this line and every unsent line back on the queue; counts toward giving up.
+        sendfails=$((sendfails + 1))
+        log "hc get $lane failed ($lrc) for a queued escalation"
         j=$i
         while [ $j -lt ${#lines[@]} ]; do
           printf '%s\n' "${lines[$j]}" >>"$queue"
