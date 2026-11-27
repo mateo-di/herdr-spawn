@@ -128,13 +128,20 @@ test('coordinator-ask ignores a TUI lane without a known lane_mode', async t => 
   await expectSilent(f);
 });
 
-test('coordinator-ask ignores a TUI lane whose goal startup failed', async t => {
+test('coordinator-ask counts a TUI lane whose goal startup failed', async t => {
   const f = await fixture(t);
   await f.setDb({ agents: [{
     name: 'failed-lane',
     tokens: { lane_of: 'coord', lane_mode: 'unit', lane_state: 'working', goal_startup: 'failed' },
   }] });
-  await expectSilent(f);
+  await expectDeny(f, ['failed-lane']);
+});
+
+test('coordinator-ask hides a TUI lane name with a trailing newline', async t => {
+  const f = await fixture(t);
+  await f.setDb({ agents: [{ name: 'ok\n', tokens: { lane_of: 'coord', lane_mode: 'unit', lane_state: 'working' } }] });
+  const reason = await expectDeny(f, ['a lane']);
+  assert.ok(!reason.includes('ok'), reason);
 });
 
 test('coordinator-ask hides TUI lane names outside the shape spawn.sh writes', async t => {

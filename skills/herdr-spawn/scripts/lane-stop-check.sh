@@ -30,6 +30,9 @@ fi
 dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 state=${XDG_STATE_HOME:-$HOME/.local/state}/herdr-spawn
 count=$state/stopblock-${pane//[!A-Za-z0-9_-]/_}
+asked=$state/asked-${pane//[!A-Za-z0-9_-]/_}
+# Any pane picks its own name, so one with anything beyond letters, digits and _ : . - is shown as "a lane".
+shown='if type == "string" and test("\\A[A-Za-z0-9][A-Za-z0-9_:.-]{0,63}\\z") then . else "a lane" end'
 
 reason='' report=-
 lane=${LANE_MODE:-}
@@ -50,26 +53,28 @@ if [ -n "$lane" ]; then
   fi
   [ "$st" != working ] || [ -n "${LANE_PENDING:-}" ] ||
     reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, write the full report to a file outside your repo, then run: $dir/lane.sh done \"<one-line summary>\" <report file>. If you are blocked on something only your coordinator can decide, write the full question with options and your recommendation to a file, then run: $dir/lane.sh escalate \"<one-line summary>\" <question file>. Otherwise keep working toward the goal."
-elif [ -e "$state/asked-${pane//[!A-Za-z0-9_-]/_}" ]; then
+elif [ -n "$(find "$asked" -mmin -10 2>/dev/null)" ]; then
   # hooks/coordinator-ask.sh turned this coordinator's question dialog into a plain-text question: it is
-  # waiting on the human, so this one stop goes through.
-  rm -f "$state/asked-${pane//[!A-Za-z0-9_-]/_}" "$count"
+  # waiting on the human, so this one stop goes through. An older marker was left by an interrupted turn.
+  rm -f "$asked" "$count"
   exit 0
 else
-  # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks.
+  rm -f "$asked"
+  # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks. The key is read back
+  # as one word, so it keeps no whitespace from a name or report.
   if [ "$app" = 1 ]; then
     # Read without HC_TERMINAL_ID: a read by the parent marks a child's news seen and swallows its notice. Each
     # child is parsed on its own, so one that ended or answered garbage hides no waiting lane.
     read -r report waiting < <(for t in $(env -u HC_TERMINAL_ID hc ls --json 2>/dev/null | jq -r --arg c "$pane" '.terminals[] | select(.parent == $c) | .address'); do
-      env -u HC_TERMINAL_ID hc get "$t" --json 2>/dev/null | jq -c . 2>/dev/null || :
+      env -u HC_TERMINAL_ID hc get "$t" --json 2>/dev/null | jq -c 'select(type == "object")' 2>/dev/null || :
     done | jq -rs --arg c "$pane" '
       [.[] | select(.labels.lane_of == $c and .labels.lane_state == "escalated")]
-      | "\(map("\(.name):\(.labels.lane_report // "-")") | join(",") | if . == "" then "-" else . end) \(map(.name) | join(", "))"') ||
+      | "\(map("\(.name):\(.labels.lane_report // "-")") | join(",") | gsub("\\s"; "_") | if . == "" then "-" else . end) \(map(.name | '"$shown"') | join(", "))"') ||
       report=- waiting=''
   else
     read -r report waiting < <(herdr agent list 2>/dev/null | jq -r --arg c "$pane" '
       [.result.agents[] | select(.tokens.lane_of == $c and .tokens.lane_state == "escalated")]
-      | "\(map("\(.name):\(.tokens.lane_report // "-")") | join(",") | if . == "" then "-" else . end) \(map(.name) | join(", "))"') ||
+      | "\(map("\(.name):\(.tokens.lane_report // "-")") | join(",") | gsub("\\s"; "_") | if . == "" then "-" else . end) \(map(.name | '"$shown"') | join(", "))"') ||
       report=- waiting=''
   fi
   [ -z "$waiting" ] ||
