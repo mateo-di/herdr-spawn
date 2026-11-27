@@ -50,6 +50,11 @@ if [ -n "$lane" ]; then
   fi
   [ "$st" != working ] || [ -n "${LANE_PENDING:-}" ] ||
     reason="You are a lane and have not reported yet. If your goal's done criterion holds and you verified it, write the full report to a file outside your repo, then run: $dir/lane.sh done \"<one-line summary>\" <report file>. If you are blocked on something only your coordinator can decide, write the full question with options and your recommendation to a file, then run: $dir/lane.sh escalate \"<one-line summary>\" <question file>. Otherwise keep working toward the goal."
+elif [ -e "$state/asked-${pane//[!A-Za-z0-9_-]/_}" ]; then
+  # hooks/coordinator-ask.sh turned this coordinator's question dialog into a plain-text question: it is
+  # waiting on the human, so this one stop goes through.
+  rm -f "$state/asked-${pane//[!A-Za-z0-9_-]/_}" "$count"
+  exit 0
 else
   # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks.
   if [ "$app" = 1 ]; then

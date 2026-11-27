@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +78,21 @@ test('lane-stop-check ignores a TUI pane without lane_of or with an unknown lane
     await f.setDb({ pane: { lane_of, lane_mode: 'unit', lane_state: 'working' }, agents: [] });
     assert.equal((await f.runCheck()).stdout, '');
   }
+});
+
+test('lane-stop-check lets one coordinator stop after coordinator-ask denied, then blocks again', async t => {
+  const f = await fixture(t);
+  await f.setDb({ pane: {}, agents: [
+    { name: 'esc', tokens: { lane_of: 'pane-1', lane_mode: 'unit', lane_state: 'escalated' } },
+  ] });
+  assert.match((await f.runCheck()).stdout, /^Lanes waiting on your answer: esc\./);
+  const state = join(f.state, 'herdr-spawn');
+  await mkdir(state, { recursive: true });
+  const asked = join(state, 'asked-pane-1');
+  await writeFile(asked, '');
+  assert.equal((await f.runCheck()).stdout, '');
+  await assert.rejects(access(asked), { code: 'ENOENT' });
+  assert.match((await f.runCheck()).stdout, /^Lanes waiting on your answer: esc\./);
 });
 
 test('lane-stop.sh lets a restored lane stop while background work runs, and blocks it otherwise', async t => {
