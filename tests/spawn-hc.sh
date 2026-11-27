@@ -95,6 +95,15 @@ grep -Fxq 'herdr.tab=tb-parent' "$TEST_ARGS"
 if grep -Fq -- --model "$TEST_ARGS"; then exit 1; fi
 printf '%s\n' 'PASS: ordinary same-tab launches get both labels without the UI or a model override'
 
+mkdir -p "$tmp/trust-repo" "$tmp/claude"
+git -C "$tmp/trust-repo" init -q
+printf '%s\n' '{}' >"$tmp/claude/.claude.json"
+out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --tab "$tmp/trust-repo" claude trust-check "$tmp/prompt")
+[[ $out == 't-child trust-check test-agent idle' ]]
+jq -e --arg key "$(cd -P -- "$tmp/trust-repo" && pwd)" '.projects[$key].hasTrustDialogAccepted == true' \
+  "$tmp/claude/.claude.json" >/dev/null
+printf '%s\n' 'PASS: a Claude child marks its start repo trusted before launch'
+
 out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" --task mechanical codex codex-small "$tmp/prompt")
 [[ $out == 't-child codex-small test-agent idle' ]]
 grep -Fq -- 'codex --model gpt-6-luna' "$TEST_ARGS"

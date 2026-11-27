@@ -430,6 +430,10 @@ prepare_launch() {
       launch='( set +x; if OPENCODE_CONFIG_CONTENT=$('"$oc_inline"'); then export OPENCODE_CONFIG_CONTENT; '"$launch"'; else printf "%s\n" "spawn.sh: invalid child OPENCODE_CONFIG_CONTENT; OpenCode not started" >&2; exit 1; fi )'
     fi
   fi
+  # A Claude child must not stop on the folder-trust dialog; every launch path starts in ${workdir:-$PWD}.
+  if [ "$agent" = claude ]; then
+    "$scriptdir/claude-trust.sh" "${workdir:-$PWD}" || :
+  fi
 }
 
 # The Herdr app (herdr-core, `hc`) sets HC_TERMINAL_ID instead of HERDR_ENV. The child launches through hc run
