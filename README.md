@@ -113,10 +113,12 @@ Stop hooks enforce both roles. Each one calls `scripts/lane-stop-check.sh`, whic
 
 | Harness | Hook | Lanes | Coordinators |
 |---|---|---|---|
-| Claude Code | `hooks/hooks.json` (Stop, plus PostToolUse and TeammateIdle to track busy teammates) | with the plugin | with the plugin |
+| Claude Code | `hooks/hooks.json` (PreToolUse AskUserQuestion via `hooks/coordinator-ask.sh`, Stop, plus PostToolUse and TeammateIdle to track busy teammates) | with the plugin | with the plugin |
 | Codex | `hooks/lane-stop.sh` | add it as a Stop hook in `~/.codex/hooks.json` | same entry |
 | OpenCode | `adapters/opencode/herdr-lanes` | loaded by the lane template | add the directory's absolute path to `plugins` in your config |
 | oh-my-pi | `adapters/omp/herdr-lanes.ts` | loaded by the lane template | start it with `omp -e <path>` (it finds the check by its own path, so don't copy it) |
+
+In Claude Code, `hooks/coordinator-ask.sh` denies AskUserQuestion while one of the coordinator's lanes is working or escalated, because an open dialog blocks every lane notice; the coordinator asks in plain text instead.
 
 ## Coordination
 

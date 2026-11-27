@@ -58,6 +58,7 @@ Before spawning the second child on one task, write a lanes doc next to the hand
 - Ownership: the resources only each child may change. Shared resources nobody changes while lanes run go in an "exclusive, later, serial" lane.
 - One writer per shared file: serialize overlapping writes, and start dependent panes only when their inputs are ready. You write shared deliverables; each child writes its own results file and log plus proposed corrections, and you integrate them. Do not duplicate work assigned to a visible subtask with an invisible background agent.
 - Each child reports to you after each block and escalates decisions to you. A tool approval dialog is still the user's to answer; your approval is never the user's approval.
+- While a lane is working or waiting on you, ask the user in plain text and end your turn, never with a question dialog: an open dialog blocks every lane notice until it is answered. In Claude Code the plugin's `hooks/coordinator-ask.sh` denies AskUserQuestion then.
 - A status table you alone keep current, one row per child: name, lane mode, pane id, worktree and branch, status (working, blocked, review, done). It is the record you and the user read after a restart or compaction, not the chat.
 
 ## Lanes

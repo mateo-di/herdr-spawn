@@ -1,6 +1,18 @@
 {
-  "description": "Holds herdr-spawn lanes and their coordinator to their roles when they try to stop, and tracks which of a lane's teammates are still busy.",
+  "description": "Holds herdr-spawn lanes and their coordinator to their roles when they try to stop, keeps a coordinator with active lanes from opening a question dialog, and tracks which of a lane's teammates are still busy.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/coordinator-ask.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
