@@ -24,9 +24,12 @@ async function fixture(t) {
   const home = join(root, 'home');
   await mkdir(configDir);
   await mkdir(home);
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir, HOME: home };
-  const runTrust = dir => run('bash', [script, dir], { cwd: root, env, timeout: 10_000 });
-  return { root, configDir, config: join(configDir, '.claude.json'), runTrust };
+  const env = {
+    ...process.env, CLAUDE_CONFIG_DIR: configDir, HOME: home, XDG_STATE_HOME: join(root, 'state'),
+  };
+  const runTrust = (dir, extraEnv = {}, timeout = 10_000) =>
+    run('bash', [script, dir], { cwd: root, env: { ...env, ...extraEnv }, timeout });
+  return { root, configDir, config: join(configDir, '.claude.json'), env, runTrust };
 }
 
 async function initRepo(root, name = 'repo') {
@@ -55,6 +58,76 @@ test('marks a linked worktree\'s main checkout trusted and keeps other fields', 
   assert.equal(data.numStartups, 7);
   assert.deepEqual(data.projects['/somewhere/else'], { allowedTools: ['Bash'] });
   assert.ok(stderr.startsWith(`spawn.sh: trusted ${repoKey} for Claude Code in `), stderr);
+});
+
+test('keys a linked worktree outside the repo by the main checkout\'s physical path', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const worktree = join(f.root, 'wt');
+  await git(repo, ['worktree', 'add', '-q', worktree, '-b', 'wt']);
+  await writeFile(f.config, '{}');
+  await f.runTrust(worktree);
+  const data = JSON.parse(await readFile(f.config, 'utf8'));
+  assert.equal(data.projects[await realpath(repo)].hasTrustDialogAccepted, true);
+  assert.equal(data.projects[await realpath(worktree)], undefined);
+});
+
+test('refuses a .git file that points at another repository', async t => {
+  const f = await fixture(t);
+  const victim = await initRepo(f.root, 'victim');
+  const crafted = join(f.root, 'crafted');
+  await mkdir(crafted);
+  await writeFile(join(crafted, '.git'), `gitdir: ${join(victim, '.git')}\n`);
+  await writeFile(f.config, '{}');
+  const { stderr } = await f.runTrust(crafted);
+  assert.match(stderr, /not a worktree/);
+  assert.equal(await readFile(f.config, 'utf8'), '{}');
+});
+
+test('ignores an inherited GIT_DIR that points at another repository', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const other = await initRepo(f.root, 'other');
+  await writeFile(f.config, '{}');
+  await f.runTrust(repo, { GIT_DIR: join(other, '.git') });
+  const data = JSON.parse(await readFile(f.config, 'utf8'));
+  assert.equal(data.projects[await realpath(repo)].hasTrustDialogAccepted, true);
+  assert.equal(data.projects[await realpath(other)], undefined);
+});
+
+test('warns instead of reading a FIFO config', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  await run('mkfifo', [f.config]);
+  const { stderr } = await f.runTrust(repo, {}, 5_000);
+  assert.match(stderr, /not a regular file/);
+  assert.equal((await lstat(f.config)).isFIFO(), true);
+});
+
+test('leaves empty or concatenated configs alone', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  for (const bytes of ['', '{"a":1}{"b":2}']) {
+    await writeFile(f.config, bytes);
+    const { stderr } = await f.runTrust(repo);
+    assert.match(stderr, /not one JSON object/);
+    assert.equal(await readFile(f.config, 'utf8'), bytes);
+  }
+});
+
+test('parallel runs for different repositories keep both keys', async t => {
+  const f = await fixture(t);
+  const a = await initRepo(f.root, 'a');
+  const b = await initRepo(f.root, 'b');
+  const keys = [await realpath(a), await realpath(b)];
+  for (let round = 1; round <= 10; round++) {
+    await writeFile(f.config, '{}');
+    await Promise.all([f.runTrust(a), f.runTrust(b)]);
+    const data = JSON.parse(await readFile(f.config, 'utf8'));
+    for (const key of keys) {
+      assert.equal(data.projects[key]?.hasTrustDialogAccepted, true, `round ${round}: ${key}`);
+    }
+  }
 });
 
 test('leaves an already trusted config byte-identical', async t => {
