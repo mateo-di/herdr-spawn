@@ -37,7 +37,7 @@ const create = (label, parent) => {
 const pane = (row, hidden = false) => {
   const agent = { pane_id: row.id, name: row.name ?? null,
     tokens: Object.assign({}, ...Object.values(row.sources)),
-    agent: row.label === 'managed' ? 'opencode' : 'claude', agent_status: 'working' };
+    agent: row.label === 'managed' ? 'opencode' : 'claude', agent_status: process.env.MOCK_AGENT_STATUS || 'working' };
   if (!hidden && row.session) agent.agent_session = { value: row.session };
   return agent;
 };
@@ -463,6 +463,16 @@ for (const surface of ['herdr', 'hc']) {
     await assert.rejects(lane(['goal', id]), /has no goal manifest/);
     await assert.rejects(start(['--subtask-of', id, '--goal', 'Invalid parent'], 'claude', 'rejected'), /not a ready lane|goal manifest/);
     await lane(['working'], inside);
+
+    // A root lane that came up on a dialog is still a real lane, so its subtasks can be accepted.
+    {
+      const blockedRoot = await rows();
+      if (surface === 'hc') blockedRoot[rootId].labels['goal_startup'] = 'blocked';
+      else blockedRoot[rootId].sources['herdr-spawn-goal'].goal_startup = 'blocked';
+      await writeFile(db, JSON.stringify(blockedRoot));
+    }
+    await start([...subOpts, '--task', 'simple'], 'claude', 'sub-blocked-root');
+    assert.equal((await goal('sub-blocked-root')).parent_lane, rootId);
   });
 }
 
@@ -622,6 +632,23 @@ test('lane.sh restore reports not running and ambiguous sessions', async t => {
   assert.equal((await g.rows())[b].name, undefined);
   await g.pause();
   assert.equal(await g.watch(), '');
+});
+
+test('spawn.sh reports a blocked TUI lane and lane.sh goal shows blocked', async t => {
+  const f = await restoreFixture(t);
+  let blockedId;
+  try {
+    await f.spawn('blocked', { MOCK_AGENT_STATUS: 'blocked' });
+    assert.fail('expected spawn to exit 3');
+  } catch (e) {
+    assert.equal(e.code, 3);
+    blockedId = e.stdout.trim().split(' ')[0];
+    assert.match(e.stderr, /do not respawn the lane/);
+    assert.match(e.stderr, new RegExp(`herdr pane read ${blockedId} --source recent --lines 40`));
+  }
+  const manifest = JSON.parse((await f.invoke('lane.sh', ['goal', blockedId])).stdout);
+  assert.equal(manifest.goal_status, 'blocked');
+  assert.equal(manifest.goal_startup, 'blocked');
 });
 
 test('lane.sh restore works in the herdr TUI only', async t => {

@@ -15,12 +15,12 @@ case "$1:$2" in
     jq -nc --arg space "$TEST_SPACE" --arg tab "$TEST_TAB" \
       '{labels: {"herdr.space": $space, "herdr.tab": $tab}}'
     ;;
-  get:t-child) printf '%s\n' '{"status":{"app":"test-agent","state":"idle"}}' ;;
+  get:t-child) printf '{"status":{"app":"test-agent","state":"%s"}}\n' "${TEST_CHILD_STATE:-idle}" ;;
   get:done-name) printf '%s\n' '{"state":"finished"}' ;;
   get:live-name) printf '%s\n' '{"state":"live"}' ;;
   get:*) exit 3 ;;
   label:t-child)
-    [[ $# -eq 3 && $3 == goal_startup=ready ]]
+    case "${3:-}" in goal_startup=ready|goal_startup=blocked) ;; *) exit 1 ;; esac
     printf '%s\n' "$3" >"$TEST_LABEL"
     ;;
   run:*)
@@ -216,3 +216,18 @@ out=$(bash "$repo/skills/herdr-spawn/scripts/spawn.sh" claude stale-repo "$tmp/p
 [[ $out == 't-child stale-repo test-agent idle' ]]
 if grep -Fq 'warning: running herdr-spawn' "$err"; then exit 1; fi
 printf '%s\n' 'PASS: an unrelated plugin root does not warn about another install'
+
+export TEST_CHILD_STATE=blocked
+: >"$TEST_LABEL"
+err="$tmp/err"
+set +e
+out=$(spawn --tab "$tmp/work tree" 2>"$err")
+rc=$?
+set -e
+[[ $rc -eq 3 ]]
+[[ $out == 't-child test-lane test-agent blocked' ]]
+grep -Fxq 'goal_startup=blocked' "$TEST_LABEL"
+grep -Fq 'do not respawn the lane' "$err"
+grep -Fq 'hc read t-child --lines 40' "$err"
+unset TEST_CHILD_STATE
+printf '%s\n' 'PASS: a blocked lane records goal_startup=blocked and exits 3'

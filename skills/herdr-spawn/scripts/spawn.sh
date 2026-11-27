@@ -314,7 +314,7 @@ resolve_parent_lane() {
   fi
   required=$(jq -ec --arg coordinator "$coordinator" '
     select((.id | strings | test("^[^-[:space:]][^[:space:]]*$"))
-      and .meta.lane_of == $coordinator and .meta.goal_startup == "ready")
+      and .meta.lane_of == $coordinator and (.meta.goal_startup == "ready" or .meta.goal_startup == "blocked"))
   ' <<<"$root") || die "$root_ref is not a ready lane of the caller"
   parent_lane=$(jq -r '.id' <<<"$required")
   ref=$(jq -r '.meta.goal_id // empty' <<<"$required")
@@ -499,7 +499,10 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
       die "no Codex native goal startup confirmation in terminal $term after 60s, left open; inspect with: $inspect"
     [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: $inspect"
     if [ -n "$goal_target" ]; then
-      report_goal_startup ready || die "could not record goal startup on terminal $term, left open"
+      # An agent waiting on a dialog has not taken its goal; only the user can answer it.
+      startup=ready
+      [ "${status#* }" != blocked ] || startup=blocked
+      report_goal_startup "$startup" || die "could not record goal startup on terminal $term, left open"
       goal_target=
     fi
     # hc labels carry no tab name, so the window names a label-made tab by its number. Only a window on this
@@ -513,6 +516,10 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
         echo "spawn.sh: could not name tab $tab after $name; it keeps its number" >&2
     fi
     echo "$term $name $status"
+    if [ "${startup:-}" = blocked ]; then
+      echo "spawn.sh: lane $name started in terminal $term but its agent is waiting on a dialog (${status%% *} blocked); the user must answer it there (inspect with: $inspect); do not respawn the lane" >&2
+      exit 3
+    fi
     exit 0
   fi
   command -v herdr-app >/dev/null || die "run an explicit pane split on the window's host with herdr-app on PATH"
@@ -592,7 +599,9 @@ codex_ready "pane $pane" "$inspect" ||
 herdr agent rename "$pane" "$name" >/dev/null ||
   die "agent running in $pane but rename to $name failed (name taken?)"
 if [ -n "$goal_target" ]; then
-  report_goal_startup ready || die "could not record goal startup on pane $pane, left open"
+  startup=ready
+  [ "$(jq -r '.result.agent.agent_status // empty' <<<"$info")" != blocked ] || startup=blocked
+  report_goal_startup "$startup" || die "could not record goal startup on pane $pane, left open"
   goal_target=
 fi
 
@@ -631,3 +640,7 @@ if [ -n "$lane" ]; then
   "$detach" "$watch" "$HERDR_PANE_ID" >>"$watchlog" 2>&1 </dev/null &
 fi
 jq -r --arg name "$name" '.result.agent | "\(.pane_id) \($name) \(.agent) \(.agent_status)"' <<<"$info"
+if [ "${startup:-}" = blocked ]; then
+  echo "spawn.sh: lane $name started in pane $pane but its agent is waiting on a dialog ($agent_kind blocked); the user must answer it there (inspect with: $inspect); do not respawn the lane" >&2
+  exit 3
+fi
