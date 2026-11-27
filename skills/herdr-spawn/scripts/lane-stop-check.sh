@@ -58,8 +58,10 @@ elif [ -e "$state/asked-${pane//[!A-Za-z0-9_-]/_}" ]; then
 else
   # The waiting lanes' reports are the count's key, so a new escalation gets fresh blocks.
   if [ "$app" = 1 ]; then
-    read -r report waiting < <(for t in $(hc ls --json 2>/dev/null | jq -r --arg c "$pane" '.terminals[] | select(.parent == $c) | .address'); do
-      hc get "$t" --json 2>/dev/null
+    # Read without HC_TERMINAL_ID: a read by the parent marks a child's news seen and swallows its notice. Each
+    # child is parsed on its own, so one that ended or answered garbage hides no waiting lane.
+    read -r report waiting < <(for t in $(env -u HC_TERMINAL_ID hc ls --json 2>/dev/null | jq -r --arg c "$pane" '.terminals[] | select(.parent == $c) | .address'); do
+      env -u HC_TERMINAL_ID hc get "$t" --json 2>/dev/null | jq -c . 2>/dev/null || :
     done | jq -rs --arg c "$pane" '
       [.[] | select(.labels.lane_of == $c and .labels.lane_state == "escalated")]
       | "\(map("\(.name):\(.labels.lane_report // "-")") | join(",") | if . == "" then "-" else . end) \(map(.name) | join(", "))"') ||
