@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
@@ -16,6 +16,47 @@ const gitEnv = {
   GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@example.com',
 };
 const git = (cwd, args) => run('git', args, { cwd, env: gitEnv, timeout: 10_000 });
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function flockAvailable() {
+  try {
+    await run('flock', ['--version'], { timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function holdLock(lock, seconds) {
+  const holder = spawn('flock', [lock, 'sleep', String(seconds)], { stdio: 'ignore', detached: true });
+  holder.on('error', () => {});
+  return holder;
+}
+
+async function waitForLock(lock, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await run('flock', ['-n', lock, 'true'], { timeout: 2_000 });
+    } catch {
+      return;
+    }
+    await sleep(25);
+  }
+  throw new Error(`lock ${lock} was never taken`);
+}
+
+async function stopHolder(holder) {
+  if (holder.exitCode !== null || holder.signalCode !== null) return;
+  const exited = new Promise(resolve => holder.once('exit', resolve));
+  try {
+    process.kill(-holder.pid, 'SIGKILL');
+  } catch {
+    holder.kill('SIGKILL');
+  }
+  await Promise.race([exited, sleep(2_000)]);
+}
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'herdr-claude-trust-'));
@@ -184,4 +225,105 @@ test('keeps the config mode 600', async t => {
   await chmod(f.config, 0o600);
   await f.runTrust(repo);
   assert.equal((await stat(f.config)).mode & 0o777, 0o600);
+});
+
+test('does not trust a repository forged by a newline in a worktree path', async t => {
+  const f = await fixture(t);
+  const sibling = await initRepo(f.root, 'main');
+  const lnk = join(f.root, 'lnk');
+  const forged = join(f.root, `main\nworktree ${lnk}`);
+  try {
+    await mkdir(forged, { recursive: true });
+    await git(forged, ['init', '-q']);
+    await git(forged, ['commit', '-q', '--allow-empty', '-m', 'init']);
+    await git(forged, ['worktree', 'add', '-q', lnk, '-b', 'wt']);
+  } catch {
+    return t.skip('git or the filesystem refuses a newline in a directory name');
+  }
+  await writeFile(f.config, '{}');
+  const { stderr } = await f.runTrust(lnk);
+  const bytes = await readFile(f.config, 'utf8');
+  assert.match(stderr, /leaving folder trust/);
+  assert.equal(bytes, '{}');
+  assert.equal(JSON.parse(bytes).projects?.[await realpath(sibling)], undefined);
+});
+
+test('does not trust a sibling when the start directory name ends in a newline', async t => {
+  const f = await fixture(t);
+  const sibling = await initRepo(f.root, 'repo');
+  const dir = join(f.root, 'repo\n');
+  try {
+    await mkdir(dir);
+  } catch {
+    return t.skip('this filesystem refuses a newline in a directory name');
+  }
+  await writeFile(f.config, '{}');
+  const { stderr } = await f.runTrust(dir);
+  const bytes = await readFile(f.config, 'utf8');
+  assert.match(stderr, /cannot resolve/);
+  assert.equal(bytes, '{}');
+  assert.equal(JSON.parse(bytes).projects?.[await realpath(sibling)], undefined);
+});
+
+test('leaves a config whose projects is not an object alone', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const bytes = '{"projects":[1]}';
+  await writeFile(f.config, bytes);
+  const { stderr } = await f.runTrust(repo);
+  assert.match(stderr, /is not one JSON object/);
+  assert.equal(await readFile(f.config, 'utf8'), bytes);
+});
+
+test('leaves a config whose projects entry is not an object alone', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const bytes = JSON.stringify({ projects: { [await realpath(repo)]: 5 } });
+  await writeFile(f.config, bytes);
+  const { stderr } = await f.runTrust(repo);
+  assert.match(stderr, /is not one JSON object/);
+  assert.equal(await readFile(f.config, 'utf8'), bytes);
+});
+
+test('keeps a config that becomes trusted while the lock is held', async t => {
+  if (!(await flockAvailable())) return t.skip('flock is not installed');
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const key = await realpath(repo);
+  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
+  await mkdir(dirname(lock), { recursive: true });
+  await writeFile(f.config, '{}');
+  const holder = holdLock(lock, 2);
+  try {
+    await waitForLock(lock);
+    const pending = f.runTrust(repo);
+    await sleep(200);
+    const trusted = `${JSON.stringify({ projects: { [key]: { hasTrustDialogAccepted: true } } }, null, 2)}\n`;
+    await writeFile(f.config, trusted);
+    await pending;
+    assert.equal(await readFile(f.config, 'utf8'), trusted);
+  } finally {
+    await stopHolder(holder);
+  }
+});
+
+test('warns and leaves the config alone when the lock is held too long', async t => {
+  if (!(await flockAvailable())) return t.skip('flock is not installed');
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
+  await mkdir(dirname(lock), { recursive: true });
+  await writeFile(f.config, '{}');
+  const holder = holdLock(lock, 7);
+  try {
+    await waitForLock(lock);
+    const started = Date.now();
+    const { stderr } = await f.runTrust(repo, {}, 12_000);
+    const elapsed = Date.now() - started;
+    assert.match(stderr, /another claude-trust run holds/);
+    assert.equal(await readFile(f.config, 'utf8'), '{}');
+    assert.ok(elapsed < 6_500, `took ${elapsed}ms`);
+  } finally {
+    await stopHolder(holder);
+  }
 });
