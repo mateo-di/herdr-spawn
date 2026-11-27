@@ -6,10 +6,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const script = fileURLToPath(new URL('../skills/herdr-spawn/scripts/claude-trust.sh', import.meta.url));
+const BASE_TOOLS = ['bash', 'env', 'git', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink'];
 
 const gitEnv = {
   ...process.env,
@@ -18,20 +20,9 @@ const gitEnv = {
 };
 const git = (cwd, args) => run('git', args, { cwd, env: gitEnv, timeout: 10_000 });
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-async function flockAvailable() {
+async function available(cmd, args) {
   try {
-    await run('flock', ['--version'], { timeout: 5_000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function perlAvailable() {
-  try {
-    await run('perl', ['-e', 'exit 0'], { timeout: 5_000 });
+    await run(cmd, args, { timeout: 5_000 });
     return true;
   } catch {
     return false;
@@ -67,6 +58,14 @@ async function exists(path) {
   }
 }
 
+async function runWithBin(f, bin, dir, extraEnv = {}, timeout = 12_000) {
+  return run(await resolveBin('bash'), [script, dir], {
+    cwd: f.root,
+    env: { ...f.env, ...extraEnv, PATH: bin },
+    timeout,
+  });
+}
+
 function holdLock(lock, seconds) {
   const holder = spawn('flock', [lock, 'sleep', String(seconds)], { stdio: 'ignore', detached: true });
   holder.on('error', () => {});
@@ -81,7 +80,7 @@ async function waitForLock(lock, timeoutMs = 3_000) {
     } catch {
       return;
     }
-    await sleep(25);
+    await delay(25);
   }
   throw new Error(`lock ${lock} was never taken`);
 }
@@ -94,7 +93,7 @@ async function stopHolder(holder) {
   } catch {
     holder.kill('SIGKILL');
   }
-  await Promise.race([exited, sleep(2_000)]);
+  await Promise.race([exited, delay(2_000)]);
 }
 
 async function fixture(t) {
@@ -102,14 +101,24 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   const configDir = join(root, 'claude');
   const home = join(root, 'home');
+  const lock = join(root, 'state', 'herdr-spawn', 'claude-trust.lock');
   await mkdir(configDir);
   await mkdir(home);
+  await mkdir(dirname(lock), { recursive: true });
   const env = {
     ...process.env, CLAUDE_CONFIG_DIR: configDir, HOME: home, XDG_STATE_HOME: join(root, 'state'),
   };
   const runTrust = (dir, extraEnv = {}, timeout = 10_000) =>
     run('bash', [script, dir], { cwd: root, env: { ...env, ...extraEnv }, timeout });
-  return { root, configDir, config: join(configDir, '.claude.json'), env, runTrust };
+  return { root, configDir, config: join(configDir, '.claude.json'), env, lock, runTrust };
+}
+
+async function readConfig(f) {
+  return JSON.parse(await readFile(f.config, 'utf8'));
+}
+
+async function assertTrusted(f, dir) {
+  assert.equal((await readConfig(f)).projects[await realpath(dir)].hasTrustDialogAccepted, true);
 }
 
 async function initRepo(root, name = 'repo') {
@@ -132,24 +141,12 @@ test('marks a linked worktree\'s main checkout trusted and keeps other fields', 
     projects: { '/somewhere/else': { allowedTools: ['Bash'] } },
   }, null, 2));
   const { stderr } = await f.runTrust(worktree);
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[repoKey].hasTrustDialogAccepted, true);
+  const data = await readConfig(f);
+  await assertTrusted(f, repo);
   assert.equal(data.projects[worktreeKey], undefined);
   assert.equal(data.numStartups, 7);
   assert.deepEqual(data.projects['/somewhere/else'], { allowedTools: ['Bash'] });
   assert.ok(stderr.startsWith(`spawn.sh: trusted ${repoKey} for Claude Code in `), stderr);
-});
-
-test('keys a linked worktree outside the repo by the main checkout\'s physical path', async t => {
-  const f = await fixture(t);
-  const repo = await initRepo(f.root);
-  const worktree = join(f.root, 'wt');
-  await git(repo, ['worktree', 'add', '-q', worktree, '-b', 'wt']);
-  await writeFile(f.config, '{}');
-  await f.runTrust(worktree);
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[await realpath(repo)].hasTrustDialogAccepted, true);
-  assert.equal(data.projects[await realpath(worktree)], undefined);
 });
 
 test('refuses a .git file that points at another repository', async t => {
@@ -170,8 +167,8 @@ test('ignores an inherited GIT_DIR that points at another repository', async t =
   const other = await initRepo(f.root, 'other');
   await writeFile(f.config, '{}');
   await f.runTrust(repo, { GIT_DIR: join(other, '.git') });
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[await realpath(repo)].hasTrustDialogAccepted, true);
+  await assertTrusted(f, repo);
+  const data = await readConfig(f);
   assert.equal(data.projects[await realpath(other)], undefined);
 });
 
@@ -203,7 +200,7 @@ test('parallel runs for different repositories keep both keys', async t => {
   for (let round = 1; round <= 10; round++) {
     await writeFile(f.config, '{}');
     await Promise.all([f.runTrust(a), f.runTrust(b)]);
-    const data = JSON.parse(await readFile(f.config, 'utf8'));
+    const data = await readConfig(f);
     for (const key of keys) {
       assert.equal(data.projects[key]?.hasTrustDialogAccepted, true, `round ${round}: ${key}`);
     }
@@ -232,9 +229,7 @@ test('keys a non-git directory by its own physical path', async t => {
   await mkdir(dir);
   await writeFile(f.config, '{}');
   await f.runTrust(dir);
-  const key = await realpath(dir);
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
+  await assertTrusted(f, dir);
 });
 
 test('follows a symlinked config and keeps the link', async t => {
@@ -244,8 +239,7 @@ test('follows a symlinked config and keeps the link', async t => {
   await writeFile(shared, '{}');
   await symlink(shared, f.config);
   await f.runTrust(repo);
-  const data = JSON.parse(await readFile(shared, 'utf8'));
-  assert.equal(data.projects[await realpath(repo)].hasTrustDialogAccepted, true);
+  await assertTrusted(f, repo);
   assert.equal((await lstat(f.config)).isSymbolicLink(), true);
 });
 
@@ -325,20 +319,19 @@ test('leaves a config whose projects entry is not an object alone', async t => {
 });
 
 test('keeps a config that becomes trusted while the lock is held', async t => {
-  if (!(await flockAvailable())) return t.skip('flock is not installed');
+  if (!(await available('flock', ['--version']))) return t.skip('flock is not installed');
   const f = await fixture(t);
   const repo = await initRepo(f.root);
   const key = await realpath(repo);
-  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
-  await mkdir(dirname(lock), { recursive: true });
   await writeFile(f.config, '{}');
-  const holder = holdLock(lock, 3);
+  const holder = holdLock(f.lock, 3);
   try {
-    await waitForLock(lock);
+    await waitForLock(f.lock);
     const pending = f.runTrust(repo);
-    await sleep(1000);
+    await delay(1000);
     const trusted = JSON.stringify({ projects: { [key]: { hasTrustDialogAccepted: true } }, keep: 1 });
     await writeFile(f.config, trusted);
+    await stopHolder(holder);
     await pending;
     assert.equal(await readFile(f.config, 'utf8'), trusted);
   } finally {
@@ -347,15 +340,13 @@ test('keeps a config that becomes trusted while the lock is held', async t => {
 });
 
 test('warns and leaves the config alone when the lock is held too long', async t => {
-  if (!(await flockAvailable())) return t.skip('flock is not installed');
+  if (!(await available('flock', ['--version']))) return t.skip('flock is not installed');
   const f = await fixture(t);
   const repo = await initRepo(f.root);
-  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
-  await mkdir(dirname(lock), { recursive: true });
   await writeFile(f.config, '{}');
-  const holder = holdLock(lock, 7);
+  const holder = holdLock(f.lock, 7);
   try {
-    await waitForLock(lock);
+    await waitForLock(f.lock);
     const started = Date.now();
     const { stderr } = await f.runTrust(repo, {}, 12_000);
     const elapsed = Date.now() - started;
@@ -368,26 +359,18 @@ test('warns and leaves the config alone when the lock is held too long', async t
 });
 
 test('takes the lock with perl when flock is missing', async t => {
-  if (!(await flockAvailable()) || !(await perlAvailable())) {
+  if (!(await available('flock', ['--version'])) || !(await available('perl', ['-e', 'exit 0']))) {
     return t.skip('flock and perl are both required');
   }
   const f = await fixture(t);
   const repo = await initRepo(f.root);
-  const key = await realpath(repo);
-  const bin = await toolBin(f.root, [
-    'bash', 'env', 'git', 'jq', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink', 'perl',
-  ]);
-  const bashBin = await resolveBin('bash');
-  const runTrust = (dir, timeout = 12_000) =>
-    run(bashBin, [script, dir], { cwd: f.root, env: { ...f.env, PATH: bin }, timeout });
-  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
-  await mkdir(dirname(lock), { recursive: true });
+  const bin = await toolBin(f.root, [...BASE_TOOLS, 'jq', 'perl']);
   await writeFile(f.config, '{}');
-  const holder = holdLock(lock, 7);
+  const holder = holdLock(f.lock, 7);
   try {
-    await waitForLock(lock);
+    await waitForLock(f.lock);
     const started = Date.now();
-    const { stderr } = await runTrust(repo);
+    const { stderr } = await runWithBin(f, bin, repo);
     const elapsed = Date.now() - started;
     assert.match(stderr, /another claude-trust run holds/);
     assert.equal(await readFile(f.config, 'utf8'), '{}');
@@ -395,46 +378,34 @@ test('takes the lock with perl when flock is missing', async t => {
   } finally {
     await stopHolder(holder);
   }
-  await runTrust(repo);
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
+  await runWithBin(f, bin, repo);
+  await assertTrusted(f, repo);
 });
 
 test('trusts without a lock when neither flock nor perl exists', async t => {
   const f = await fixture(t);
   const repo = await initRepo(f.root);
-  const key = await realpath(repo);
-  const bin = await toolBin(f.root, [
-    'bash', 'env', 'git', 'jq', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink',
-  ]);
-  const bashBin = await resolveBin('bash');
+  const bin = await toolBin(f.root, [...BASE_TOOLS, 'jq']);
   await writeFile(f.config, '{}');
-  const { stderr } = await run(bashBin, [script, repo], {
-    cwd: f.root, env: { ...f.env, PATH: bin }, timeout: 10_000,
-  });
+  const { stderr } = await runWithBin(f, bin, repo, {}, 10_000);
   assert.doesNotMatch(stderr, /lock/i);
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
+  await assertTrusted(f, repo);
 });
 
 test('keeps the perl lock until the config is written', async t => {
-  if (!(await flockAvailable()) || !(await perlAvailable())) {
+  if (!(await available('flock', ['--version'])) || !(await available('perl', ['-e', 'exit 0']))) {
     return t.skip('flock and perl are both required');
   }
   const f = await fixture(t);
   const repo = await initRepo(f.root);
-  const key = await realpath(repo);
-  const bin = await toolBin(f.root, [
-    'bash', 'env', 'git', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink', 'perl',
-  ]);
-  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
+  const bin = await toolBin(f.root, [...BASE_TOOLS, 'perl']);
   const marker = join(f.root, 'lock-marker');
   const sh = path => `'${path}'`;
   const wrapper = [
     '#!/bin/sh',
     'case "$*" in',
     "  *'hasTrustDialogAccepted = true'*)",
-    `    if ${sh(await resolveBin('flock'))} -n ${sh(lock)} ${sh(await resolveBin('true'))}; then`,
+    `    if ${sh(await resolveBin('flock'))} -n ${sh(f.lock)} ${sh(await resolveBin('true'))}; then`,
     `      printf free >> ${sh(marker)}`,
     '    else',
     `      printf held >> ${sh(marker)}`,
@@ -448,24 +419,18 @@ test('keeps the perl lock until the config is written', async t => {
   await writeFile(jq, wrapper);
   await chmod(jq, 0o755);
   await writeFile(f.config, '{}');
-  await run(await resolveBin('bash'), [script, repo], {
-    cwd: f.root, env: { ...f.env, PATH: bin }, timeout: 12_000,
-  });
+  await runWithBin(f, bin, repo);
   assert.equal(await readFile(marker, 'utf8'), 'held');
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
+  await assertTrusted(f, repo);
 });
 
 test('ignores a PERL5LIB that would load another Fcntl', async t => {
-  if (!(await flockAvailable()) || !(await perlAvailable())) {
+  if (!(await available('flock', ['--version'])) || !(await available('perl', ['-e', 'exit 0']))) {
     return t.skip('flock and perl are both required');
   }
   const f = await fixture(t);
   const repo = await initRepo(f.root);
-  const key = await realpath(repo);
-  const bin = await toolBin(f.root, [
-    'bash', 'env', 'git', 'jq', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink', 'perl',
-  ]);
+  const bin = await toolBin(f.root, [...BASE_TOOLS, 'jq', 'perl']);
   const evil = join(f.root, 'evil');
   await mkdir(evil);
   const marker = join(f.root, 'evil-loaded');
@@ -477,21 +442,17 @@ test('ignores a PERL5LIB that would load another Fcntl', async t => {
     '',
   ].join('\n'));
   await writeFile(f.config, '{}');
-  const env = { ...f.env, PATH: bin, PERL5LIB: evil };
-  delete env.PERL5OPT;
-  await run(await resolveBin('bash'), [script, repo], { cwd: f.root, env, timeout: 12_000 });
+  await runWithBin(f, bin, repo, { PERL5LIB: evil, PERL5OPT: undefined });
   assert.equal(await exists(marker), false);
-  const data = JSON.parse(await readFile(f.config, 'utf8'));
-  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
+  await assertTrusted(f, repo);
 });
 
 test('creates the lock file private', async t => {
-  if (!(await flockAvailable())) return t.skip('flock is not installed');
+  if (!(await available('flock', ['--version']))) return t.skip('flock is not installed');
   const f = await fixture(t);
   const repo = await initRepo(f.root);
   await writeFile(f.config, '{}');
   await f.runTrust(repo);
-  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
-  const { mode } = await stat(lock);
+  const { mode } = await stat(f.lock);
   assert.equal(mode & 0o077, 0);
 });
