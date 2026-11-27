@@ -120,7 +120,7 @@ Stop hooks enforce both roles. Each one calls `scripts/lane-stop-check.sh`, whic
 
 ## Coordination
 
-A Claude Code caller with a `claude` child talks to it through SendMessage in both directions. Every other pair uses Herdr (`herdr agent prompt`, `wait`, `read`), as described by the built-in `herdr` skill, or in the Herdr app herdr-core (`hc send`, `wait`, `read`). A child that shows an approval or startup dialog waits for the user to answer it in its pane.
+A Claude Code caller with a `claude` child talks to it through SendMessage in both directions. For a `claude` child, `spawn.sh` first marks the start folder's repository as trusted in Claude Code, so later sessions there apply that repo's project MCP servers and allow rules without a prompt. Every other pair uses Herdr (`herdr agent prompt`, `wait`, `read`), as described by the built-in `herdr` skill, or in the Herdr app herdr-core (`hc send`, `wait`, `read`). A child that shows an approval or startup dialog waits for the user to answer it in its pane.
 
 ## Configuration
 
