@@ -8,6 +8,8 @@
 # changed while it was read, and replaces it atomically; a session's write in the moment before the rename can
 # still be lost. Any failure is a warning: a missing key must never fail the spawn.
 set -uo pipefail
+# Another user who can open the lock file could hold the lock and keep every spawn from trusting.
+umask 077
 
 warn() { echo "spawn.sh: $*" >&2; }
 # Command substitution drops trailing newlines, so a path with a newline in it could name another directory.
@@ -146,7 +148,9 @@ if command -v flock >/dev/null || command -v perl >/dev/null; then
   if command -v flock >/dev/null; then
     flock -w 5 9
   else
-    perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or exit 1; local $SIG{ALRM} = sub { exit 1 }; alarm 5; flock($fh, LOCK_EX) or exit 1'
+    # A relative PERL5LIB or a PERL5OPT would load code from wherever the spawn runs.
+    # shellcheck disable=SC2016 # Perl code, not shell.
+    env -u PERL5LIB -u PERLLIB -u PERL5OPT perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or exit 1; local $SIG{ALRM} = sub { exit 1 }; alarm 5; flock($fh, LOCK_EX) or exit 1'
   fi || { warn "another claude-trust run holds $lock; leaving folder trust to the user"; exit 0; }
 fi
 # A temp file left behind would be a full copy of the config.
