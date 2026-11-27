@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +27,35 @@ async function flockAvailable() {
   } catch {
     return false;
   }
+}
+
+async function perlAvailable() {
+  try {
+    await run('perl', ['-e', 'exit 0'], { timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveBin(name) {
+  for (const dir of (process.env.PATH || '').split(':')) {
+    const candidate = join(dir, name);
+    try {
+      await access(candidate, constants.X_OK);
+      if ((await stat(candidate)).isFile()) return candidate;
+    } catch {
+      // Keep looking.
+    }
+  }
+  throw new Error(`cannot find ${name} on PATH`);
+}
+
+async function toolBin(root, names) {
+  const dir = join(root, 'bin');
+  await mkdir(dir);
+  for (const name of names) await symlink(await resolveBin(name), join(dir, name));
+  return dir;
 }
 
 function holdLock(lock, seconds) {
@@ -293,12 +323,12 @@ test('keeps a config that becomes trusted while the lock is held', async t => {
   const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
   await mkdir(dirname(lock), { recursive: true });
   await writeFile(f.config, '{}');
-  const holder = holdLock(lock, 2);
+  const holder = holdLock(lock, 3);
   try {
     await waitForLock(lock);
     const pending = f.runTrust(repo);
-    await sleep(200);
-    const trusted = `${JSON.stringify({ projects: { [key]: { hasTrustDialogAccepted: true } } }, null, 2)}\n`;
+    await sleep(1000);
+    const trusted = JSON.stringify({ projects: { [key]: { hasTrustDialogAccepted: true } }, keep: 1 });
     await writeFile(f.config, trusted);
     await pending;
     assert.equal(await readFile(f.config, 'utf8'), trusted);
@@ -326,4 +356,54 @@ test('warns and leaves the config alone when the lock is held too long', async t
   } finally {
     await stopHolder(holder);
   }
+});
+
+test('takes the lock with perl when flock is missing', async t => {
+  if (!(await flockAvailable()) || !(await perlAvailable())) {
+    return t.skip('flock and perl are both required');
+  }
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const key = await realpath(repo);
+  const bin = await toolBin(f.root, [
+    'bash', 'env', 'git', 'jq', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink', 'perl',
+  ]);
+  const bashBin = await resolveBin('bash');
+  const runTrust = (dir, timeout = 12_000) =>
+    run(bashBin, [script, dir], { cwd: f.root, env: { ...f.env, PATH: bin }, timeout });
+  const lock = join(f.root, 'state', 'herdr-spawn', 'claude-trust.lock');
+  await mkdir(dirname(lock), { recursive: true });
+  await writeFile(f.config, '{}');
+  const holder = holdLock(lock, 7);
+  try {
+    await waitForLock(lock);
+    const started = Date.now();
+    const { stderr } = await runTrust(repo);
+    const elapsed = Date.now() - started;
+    assert.match(stderr, /another claude-trust run holds/);
+    assert.equal(await readFile(f.config, 'utf8'), '{}');
+    assert.ok(elapsed < 6_500, `took ${elapsed}ms`);
+  } finally {
+    await stopHolder(holder);
+  }
+  await runTrust(repo);
+  const data = JSON.parse(await readFile(f.config, 'utf8'));
+  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
+});
+
+test('trusts without a lock when neither flock nor perl exists', async t => {
+  const f = await fixture(t);
+  const repo = await initRepo(f.root);
+  const key = await realpath(repo);
+  const bin = await toolBin(f.root, [
+    'bash', 'env', 'git', 'jq', 'cksum', 'mktemp', 'stat', 'chmod', 'mv', 'rm', 'mkdir', 'dirname', 'readlink',
+  ]);
+  const bashBin = await resolveBin('bash');
+  await writeFile(f.config, '{}');
+  const { stderr } = await run(bashBin, [script, repo], {
+    cwd: f.root, env: { ...f.env, PATH: bin }, timeout: 10_000,
+  });
+  assert.doesNotMatch(stderr, /lock/i);
+  const data = JSON.parse(await readFile(f.config, 'utf8'));
+  assert.equal(data.projects[key].hasTrustDialogAccepted, true);
 });

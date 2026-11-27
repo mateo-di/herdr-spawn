@@ -55,7 +55,7 @@ if top=$(git_clean -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$to
     esac
   done < <(git_clean -C "$dir" worktree list --porcelain -z 2>/dev/null)
   if [ -z "$first" ]; then
-    warn "cannot list the git worktrees for $dir; leaving folder trust to the user"
+    warn "cannot list the git worktrees for $dir (needs git 2.36 or newer); leaving folder trust to the user"
     exit 0
   fi
   if [ "$seen" != 1 ]; then
@@ -131,9 +131,10 @@ if jq -s -e --arg key "$key" "$trusted" "$target" >/dev/null 2>&1; then
   exit 0
 fi
 
-# flock lets go when the run ends, however it ends. Without flock (macOS) spawns are not serialized, and the
-# checksum below still catches most overlaps.
-if command -v flock >/dev/null; then
+# An flock(2) lock on fd 9 lets go when the run ends, however it ends. macOS has no flock(1), so perl takes the
+# same lock there, and this shell keeps holding it through fd 9 after perl exits. With neither, spawns are not
+# serialized, and the checksum below still catches most overlaps.
+if command -v flock >/dev/null || command -v perl >/dev/null; then
   statebase=${XDG_STATE_HOME:-${HOME:+$HOME/.local/state}}
   if [ -z "$statebase" ]; then
     warn "neither XDG_STATE_HOME nor HOME is set; leaving folder trust to the user"
@@ -142,7 +143,11 @@ if command -v flock >/dev/null; then
   lock=$statebase/herdr-spawn/claude-trust.lock
   { mkdir -p "${lock%/*}" && exec 9>>"$lock"; } 2>/dev/null ||
     { warn "cannot open $lock; leaving folder trust to the user"; exit 0; }
-  flock -w 5 9 || { warn "another claude-trust run holds $lock; leaving folder trust to the user"; exit 0; }
+  if command -v flock >/dev/null; then
+    flock -w 5 9
+  else
+    perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or exit 1; local $SIG{ALRM} = sub { exit 1 }; alarm 5; flock($fh, LOCK_EX) or exit 1'
+  fi || { warn "another claude-trust run holds $lock; leaving folder trust to the user"; exit 0; }
 fi
 # A temp file left behind would be a full copy of the config.
 tmp=
