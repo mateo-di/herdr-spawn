@@ -4,12 +4,21 @@
 # this folder?" for a folder it has not seen, so a spawned child would sit idle before taking its prompt.
 # The spawn starts the child in a folder the user chose, so it marks that folder's repository trusted first.
 # Trust lives in .claude.json as projects["<repo root>"].hasTrustDialogAccepted. Other Claude sessions rewrite
-# that file while they run, so this changes only that one key, holds a lock, verifies the file did not change
-# underneath, and replaces it atomically. Any failure is a warning: a missing key must never fail the spawn.
+# that file while they run, so this changes only that one key, locks out other spawns, starts over when the file
+# changed while it was read, and replaces it atomically; a session's write in the moment before the rename can
+# still be lost. Any failure is a warning: a missing key must never fail the spawn.
 set -uo pipefail
 
 warn() { echo "spawn.sh: $*" >&2; }
-physical() { CDPATH='' cd -P -- "$1" 2>/dev/null && pwd; }
+# Command substitution drops trailing newlines, so a path with a newline in it could name another directory.
+physical() {
+  local p
+  p=$(CDPATH='' cd -P -- "$1" 2>/dev/null && pwd && echo .) || return 1
+  p=${p%$'\n.'}
+  case $p in *$'\n'*) return 1 ;; esac
+  printf '%s\n' "$p"
+}
+command -v jq >/dev/null || { warn "jq is missing; leaving folder trust to the user"; exit 0; }
 # An inherited GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR or GIT_INDEX_FILE can point git at another repository.
 git_clean() { env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE git "$@"; }
 
@@ -29,9 +38,9 @@ if top=$(git_clean -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$to
     warn "cannot resolve the working tree root $top; leaving folder trust to the user"
     exit 0
   fi
-  list=$(git_clean -C "$dir" worktree list --porcelain 2>/dev/null) || list=
   first='' firstphys='' entry=0 seen=0 firstbare=0
-  while IFS= read -r line; do
+  # -z, because git prints paths raw and a newline in one would forge another entry.
+  while IFS= read -r -d '' line; do
     case $line in
       'worktree '*)
         entry=$((entry + 1))
@@ -44,7 +53,7 @@ if top=$(git_clean -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$to
         if [ "$entry" -eq 1 ]; then firstbare=1; fi
         ;;
     esac
-  done <<<"$list"
+  done < <(git_clean -C "$dir" worktree list --porcelain -z 2>/dev/null)
   if [ -z "$first" ]; then
     warn "cannot list the git worktrees for $dir; leaving folder trust to the user"
     exit 0
@@ -109,38 +118,35 @@ targetdir=$(physical "$(dirname -- "$target")") ||
   { warn "cannot resolve the directory of $target; leaving folder trust to the user"; exit 0; }
 target=$targetdir/${target##*/}
 
+# jq accepts empty input and concatenated objects, so both filters read the file as a list and want one object.
+# shellcheck disable=SC2016 # $key is a jq variable.
+trusted='length == 1 and (.[0] | type == "object") and (((.[0].projects[$key].hasTrustDialogAccepted)? // null) == true)'
+# Setting the one key must not replace anything, so projects and this repository's entry are objects or absent.
+# shellcheck disable=SC2016 # $key is a jq variable.
+usable='length == 1 and (.[0] | type == "object" and (.projects | type == "object" or type == "null")
+  and ((.projects // {})[$key] | type == "object" or type == "null"))'
+
 # The common case: another spawn or session already trusted this repository, so the file stays untouched.
-if jq -s -e --arg key "$key" '
-  length == 1 and (.[0] | type == "object")
-  and (.[0].projects[$key].hasTrustDialogAccepted == true)
-' "$target" >/dev/null 2>&1; then
+if jq -s -e --arg key "$key" "$trusted" "$target" >/dev/null 2>&1; then
   exit 0
 fi
 
-statebase=${XDG_STATE_HOME:-${HOME:+$HOME/.local/state}}
-if [ -z "$statebase" ]; then
-  warn "neither XDG_STATE_HOME nor HOME is set; leaving folder trust to the user"
-  exit 0
-fi
-statedir=$statebase/herdr-spawn
-mkdir -p "$statedir" 2>/dev/null ||
-  { warn "cannot create $statedir; leaving folder trust to the user"; exit 0; }
-lock=$statedir/claude-trust.lock
-waited=0
-until mkdir "$lock" 2>/dev/null; do
-  if [ "$waited" -ge 50 ]; then
-    # No run holds the lock for a minute, so an older one was left by a run killed before its trap ran.
-    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null; then
-      waited=0
-      continue
-    fi
-    warn "another claude-trust run holds $lock; leaving folder trust to the user"
+# flock lets go when the run ends, however it ends. Without flock (macOS) spawns are not serialized, and the
+# checksum below still catches most overlaps.
+if command -v flock >/dev/null; then
+  statebase=${XDG_STATE_HOME:-${HOME:+$HOME/.local/state}}
+  if [ -z "$statebase" ]; then
+    warn "neither XDG_STATE_HOME nor HOME is set; leaving folder trust to the user"
     exit 0
   fi
-  sleep 0.1
-  waited=$((waited + 1))
-done
-trap 'rmdir "$lock" 2>/dev/null || :' EXIT
+  lock=$statebase/herdr-spawn/claude-trust.lock
+  { mkdir -p "${lock%/*}" && exec 9>>"$lock"; } 2>/dev/null ||
+    { warn "cannot open $lock; leaving folder trust to the user"; exit 0; }
+  flock -w 5 9 || { warn "another claude-trust run holds $lock; leaving folder trust to the user"; exit 0; }
+fi
+# A temp file left behind would be a full copy of the config.
+tmp=
+trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
 
 attempt=0
 written=0
@@ -151,44 +157,38 @@ while [ "$attempt" -lt 5 ]; do
     warn "cannot read $target; leaving folder trust to the user"
     exit 0
   fi
-  # jq accepts empty input and concatenated objects; only one object is a usable config.
-  if ! jq -s -e 'length == 1 and (.[0] | type == "object")' "$target" >/dev/null 2>&1; then
-    warn "$target is not one JSON object; leaving folder trust to the user"
+  # Trusted while this run waited for the lock.
+  if jq -s -e --arg key "$key" "$trusted" "$target" >/dev/null 2>&1; then
+    exit 0
+  fi
+  if ! jq -s -e --arg key "$key" "$usable" "$target" >/dev/null 2>&1; then
+    warn "$target is not one JSON object, or its projects entry for $key is not an object; leaving folder trust to the user"
     exit 0
   fi
   mode=$(stat -c '%a' -- "$target" 2>/dev/null) || mode=
   [ -n "$mode" ] || mode=$(stat -f '%Lp' -- "$target" 2>/dev/null) || mode=
   tmp=$(mktemp "$targetdir/.claude.json.XXXXXXXX" 2>/dev/null) ||
-    { warn "cannot create a temporary file next to $target; leaving folder trust to the user"; exit 0; }
-  if ! jq --arg key "$key" '
-    .projects = (
-      (.projects | if type == "object" then . else {} end)
-      | .[$key] = ((.[$key] | if type == "object" then . else {} end) | .hasTrustDialogAccepted = true)
-    )' "$target" >"$tmp" 2>/dev/null; then
-    rm -f -- "$tmp"
+    { tmp=; warn "cannot create a temporary file next to $target; leaving folder trust to the user"; exit 0; }
+  if ! jq --arg key "$key" '.projects[$key].hasTrustDialogAccepted = true' "$target" >"$tmp" 2>/dev/null; then
     warn "cannot update $target; leaving folder trust to the user"
     exit 0
   fi
-  if [ ! -s "$tmp" ] ||
-    ! jq -s -e --arg key "$key" '
-      length == 1 and (.[0] | type == "object")
-      and (.[0].projects[$key].hasTrustDialogAccepted == true)
-    ' "$tmp" >/dev/null 2>&1; then
-    rm -f -- "$tmp"
+  if [ ! -s "$tmp" ] || ! jq -s -e --arg key "$key" "$trusted" "$tmp" >/dev/null 2>&1; then
     warn "refusing to write a broken $target; leaving folder trust to the user"
     exit 0
   fi
   after=$(cksum <"$target" 2>/dev/null) || after=
   if [ "$after" != "$before" ]; then
     rm -f -- "$tmp"
+    tmp=
     continue
   fi
   if [ -n "$mode" ]; then chmod "$mode" -- "$tmp" 2>/dev/null || :; fi
   if mv -f -- "$tmp" "$target" 2>/dev/null; then
+    tmp=
     written=1
     break
   fi
-  rm -f -- "$tmp"
   warn "cannot replace $target; leaving folder trust to the user"
   exit 0
 done
@@ -197,10 +197,7 @@ if [ "$written" != 1 ]; then
   exit 0
 fi
 
-if jq -s -e --arg key "$key" '
-  length == 1 and (.[0] | type == "object")
-  and (.[0].projects[$key].hasTrustDialogAccepted == true)
-' "$target" >/dev/null 2>&1; then
+if jq -s -e --arg key "$key" "$trusted" "$target" >/dev/null 2>&1; then
   echo "spawn.sh: trusted $key for Claude Code in $config" >&2
 else
   warn "wrote $target but $key is still not trusted"
