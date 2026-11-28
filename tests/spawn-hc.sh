@@ -398,7 +398,6 @@ unset TEST_CHILD_STATE
 printf '%s\n' 'PASS: a blocked lane records goal_startup=blocked and exits 3'
 
 # Session names and colors: assert what each fake CLI was called with once the launch line ran.
-unset TEST_CHILD_STATE
 export TEST_UI_SHOWS_TAB=0
 root=$(cd -P -- "$repo" && pwd)
 script=$root/skills/herdr-spawn/scripts/spawn.sh

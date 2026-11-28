@@ -16,6 +16,7 @@ async function recorded($, path) {
     const read = await $.fs.read(path, { offset, length: chunk })
     const text = offset === 0 ? `\n${read}` : read
     for (const key of Object.keys(rows)) found[key] ||= text.includes(rows[key])
+    if (found.name && found.color) break
   }
   return found
 }

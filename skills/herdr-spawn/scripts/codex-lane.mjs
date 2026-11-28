@@ -79,7 +79,6 @@ async function bootstrap(objective) {
   }
 
   let timer;
-  let nameTimer;
   try {
     return await Promise.race([
       (async () => {
@@ -108,8 +107,8 @@ async function bootstrap(objective) {
           // A lane's goal matters more than its name: name last, and give up before the startup deadline.
           // No request may follow, since an abandoned one would still consume the next response.
           try {
-            await Promise.race([setName(threadId), new Promise((_, reject) => {
-              nameTimer = setTimeout(() => reject(new Error('naming timed out after 5s')), 5_000);
+            await Promise.race([setName(threadId), delay(5_000, undefined, { ref: false }).then(() => {
+              throw new Error('naming timed out after 5s');
             })]);
           } catch (error) {
             console.error(`codex-lane: could not name thread ${threadId}, continuing: ${error.message}`);
@@ -135,7 +134,6 @@ async function bootstrap(objective) {
     ]);
   } finally {
     clearTimeout(timer);
-    clearTimeout(nameTimer);
     output.close();
     server.stdin.destroy();
     // A launcher's child outlives the kill and holds this pipe, which would keep the helper running.
