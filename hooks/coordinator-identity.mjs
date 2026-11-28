@@ -40,19 +40,18 @@ async function apply($, turn) {
   if (request.sessionId !== id || request.done) return
   // A -p run draws nowhere; it may be a second process on a session someone has open.
   if (!(await $.session.surfaces()).length) return
-  for (const call of await missingFrom($, request)) {
+  for (;;) {
+    // A fresh look before each command: the user can set either one at any moment.
+    const missing = await missingFrom($, request)
+    if (!missing.length) break
     // Once per session, so a command Claude Code refuses is not repeated after every turn.
-    const asked = `${id} ${call.command}`
-    if (turn.asked.has(asked)) continue
-    // The user can set either one while a turn runs: one that started since the transcript was read leaves the
-    // rest to a fresh look after it.
-    if (turn.running) return
+    const call = missing.find(({ command }) => !turn.asked.has(`${id} ${command}`))
+    // A refusal is not an error, so only the transcript tells. Until it records both, the request stays pending and
+    // spawn.sh keeps telling the user. A turn that started meanwhile leaves the rest for after it.
+    if (!call || turn.running) return
     await $.command.run(call)
-    turn.asked.add(asked)
+    turn.asked.add(`${id} ${call.command}`)
   }
-  // A refusal is not an error, so only the transcript tells. Until it records both, the request stays pending and
-  // spawn.sh keeps telling the user.
-  if ((await missingFrom($, request)).length) return
   await $.fs.write(path, `${JSON.stringify({ ...request, done: true })}\n`)
 }
 

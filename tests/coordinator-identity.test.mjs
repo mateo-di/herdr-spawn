@@ -22,7 +22,7 @@ const recordOf = {
 
 function host({ transcript = message('hello'), stored = request, path = requestPath,
   env = { XDG_STATE_HOME: '/state', HOME: '/home/someone' }, surfaces = ['terminal'], reject, refuse = [],
-  turnDuring } = {}) {
+  turnDuring, typedDuring = {} } = {}) {
   // Each happens once: a command that rejects, and a turn that starts while the mod waits on the named host call.
   let rejecting = reject;
   let interrupting = turnDuring;
@@ -85,6 +85,8 @@ function host({ transcript = message('hello'), stored = request, path = requestP
         }
         commands.push(call);
         if (!refuse.includes(call.command)) append(recordOf[call.command](call.args));
+        // What the user sets while this command is awaited.
+        append(typedDuring[call.command] ?? '');
         await during(call.command);
       },
     },
@@ -272,6 +274,14 @@ for (const [turnDuring, before, typed] of [['stat', [], title], ['rename', [both
     assert.equal(session.saved().done, true);
   });
 }
+
+test('a color the user sets while /rename runs, with no turn, is kept', async () => {
+  const session = host({ typedDuring: { rename: color } });
+  await session.start();
+  assert.deepEqual(session.commands, [both[0]]);
+  assert.deepEqual(session.saved(), { ...request, done: true });
+  assert.deepEqual(session.writes, [requestPath]);
+});
 
 test('an unreadable transcript runs no command', async () => {
   const session = host({ transcript: null });
