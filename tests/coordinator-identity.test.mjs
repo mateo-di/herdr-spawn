@@ -22,11 +22,17 @@ const recordOf = {
 
 function host({ transcript = message('hello'), stored = request, path = requestPath,
   env = { XDG_STATE_HOME: '/state', HOME: '/home/someone' }, surfaces = ['terminal'], reject, refuse = [],
-  turnDuring, typedDuring = {} } = {}) {
-  // Each happens once: a command that rejects, and a turn that starts while the mod waits on the named host call.
+  turnDuring, clearDuring, typedDuring = {} } = {}) {
+  // Each happens once: a command that rejects, and a turn that starts or a session switch while the mod waits on the
+  // named host call.
   let rejecting = reject;
   let interrupting = turnDuring;
+  let switching = clearDuring;
   const during = async call => {
+    if (call === switching?.call) {
+      clear(switching.next, switching.transcript);
+      switching = undefined;
+    }
     if (call !== interrupting) return;
     interrupting = undefined;
     await fire('turn.start');
@@ -46,11 +52,11 @@ function host({ transcript = message('hello'), stored = request, path = requestP
   let current = { id, transcriptPath, path };
   const append = text =>
     files.set(current.transcriptPath, Buffer.concat([file(current.transcriptPath), Buffer.from(text)]));
-  // As /clear does: the module stays, under a new session ID with its own transcript and request.
-  function clear(next) {
+  // As /clear or /resume does: the module stays, under another session ID with its own transcript and request.
+  function clear(next, transcript = message('cleared')) {
     current = { id: next.sessionId, transcriptPath: `/transcripts/${next.sessionId}.jsonl`,
       path: `/state/herdr-spawn/identity/${next.sessionId}.json` };
-    files.set(current.transcriptPath, Buffer.from(message('cleared')));
+    files.set(current.transcriptPath, Buffer.from(transcript));
     files.set(current.path, Buffer.from(row(next)));
   }
   const $ = {
@@ -272,6 +278,18 @@ for (const [turnDuring, before, typed] of [['stat', [], title], ['rename', [both
     await session.turn();
     assert.deepEqual(session.commands, [...before, both[1]]);
     assert.equal(session.saved().done, true);
+  });
+}
+
+// A cleared session records neither; a resumed one may record both, which says nothing about the first.
+for (const [how, transcript] of [['/clear', undefined], ['/resume', message('resumed') + title + color]]) {
+  test(`a session switched by ${how} while /rename runs gets no color and leaves the request pending`, async () => {
+    const next = { ...request, sessionId: other, done: true };
+    const session = host({ clearDuring: { call: 'rename', next, transcript } });
+    await session.start();
+    assert.deepEqual(session.commands, [both[0]]);
+    assert.deepEqual(session.writes, []);
+    assert.deepEqual(session.logs, []);
   });
 }
 

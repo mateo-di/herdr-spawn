@@ -43,6 +43,8 @@ async function apply($, turn) {
   for (;;) {
     // A fresh look before each command: the user can set either one at any moment.
     const missing = await missingFrom($, request)
+    // /clear or /resume can switch sessions meanwhile: what was just read, and what runs next, must be this one's.
+    if ((await $.session.id()) !== id) return
     if (!missing.length) break
     // Once per session, so a command Claude Code refuses is not repeated after every turn.
     const call = missing.find(({ command }) => !turn.asked.has(`${id} ${command}`))
