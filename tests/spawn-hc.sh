@@ -894,6 +894,10 @@ check_request coord-linked red
 rm "$request"
 printf '%s\n' 'PASS: outside git, or without it, the working directory names the coordinator'
 
+check_unusable() {
+  grep -Fq "no usable coordinator name and color request at $request. Tell the user now, once:" "$err"
+  grep -Fq "they can type /rename and /color to set this session's name and color" "$err"
+}
 for content in 'not json' '' '[]' '{"done":false}' \
   "{\"sessionId\":\"$coordinator\",\"name\":\"coord-other\",\"color\":\"red\",\"done\":false}" \
   "{\"sessionId\":\"$me\",\"name\":\"coord-a b\",\"color\":\"red\",\"done\":false}" \
@@ -903,7 +907,7 @@ for content in 'not json' '' '[]' '{"done":false}' \
   run_spawn "${lane[@]}" claude id-foreign "$prompt"
   cmp "$request" "$tmp/foreign-request"
   [[ $(wc -l <"$err") -eq 1 ]]
-  grep -Fq 'no usable coordinator name and color request' "$err"
+  check_unusable
   calls 'length == 2 and .[1].argv[0] == "--resume"'
 done
 rm -r "$identity"
@@ -912,7 +916,7 @@ run_spawn "${lane[@]}" claude id-unwritable "$prompt"
 check_claude_color id-unwritable red
 grep -Fxq 'goal_startup=ready' "$TEST_LABEL"
 [[ $(wc -l <"$err") -eq 1 ]]
-grep -Fq 'no usable coordinator name and color request' "$err"
+check_unusable
 [[ -f $identity && ! -s $identity ]]
 rm "$identity"
 printf '%s\n' 'PASS: an unusable or unwritable request warns in one line and the lane still starts'

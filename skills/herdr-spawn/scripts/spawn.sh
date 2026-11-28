@@ -509,7 +509,8 @@ request_identity() {
   [ "$request" != 'done' ] || return 0
   name=${request%% *} color=${request#* }
   if ! known_color "$color"; then
-    echo "spawn.sh: warning: no usable coordinator name and color request at $file" >&2
+    echo "spawn.sh: warning: no usable coordinator name and color request at $file. Tell the user now, once:" \
+      "they can type /rename and /color to set this session's name and color" >&2
     return 0
   fi
   # A coordinator that spawns once gets no later turn from this script, so the user hears of it now.
