@@ -435,7 +435,8 @@ named_launch() { # <prefix> <empty arrays> <condition> <filled arrays> <command>
 }
 
 # Cuts off a hung naming step, with perl on a host without `timeout`. Either one runs only an executable.
-naming_limit='timeout 20'
+# A call that ignores the first signal must still end before the startup wait does.
+naming_limit='timeout -k 5 20'
 command -v timeout >/dev/null || naming_limit="perl -e 'alarm shift; exec @ARGV' 20"
 
 claude_colors=(red blue green yellow purple orange pink cyan)
@@ -511,9 +512,10 @@ request_identity() {
     echo "spawn.sh: warning: no usable coordinator name and color request at $file" >&2
     return 0
   fi
-  echo "spawn.sh: coordinator name $name and color $color requested for this session, not applied yet; they apply" \
-    "when this turn ends. If a later turn still says so, ask the user to type /rename $name and /color $color," \
-    "whichever this session lacks" >&2
+  # A coordinator that spawns once gets no later turn from this script, so the user hears of it now.
+  echo "spawn.sh: coordinator name $name and color $color requested for this session, not applied yet. Tell the user" \
+    "now, once: if this session's name and color have not changed when this turn ends, they can type /rename $name" \
+    "and /color $color, whichever it lacks" >&2
 }
 
 # A template that runs a subcommand (a bare word after `claude`), selects a session itself or where it runs, or
@@ -543,6 +545,10 @@ color_claude() {
   # A function or alias cannot be time-limited, so a wrapped `claude` starts without a color.
   condition="[[ \$(command -v claude) = /* ]] && herdr_spawn_response=\$($call </dev/null 2>/dev/null)"
   condition+=" && [ \"\$herdr_spawn_response\" = 'Session color set to: $color' ]"
+  # The call also succeeds where it saves no transcript, and then there is no session to resume. find, since an
+  # unmatched glob aborts a zsh line; through command, since an interactive shell may alias it to another tool.
+  condition+=" && [ -n \"\$(command find \"\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/projects/\" -mindepth 2 -maxdepth 2"
+  condition+=" -name $uuid.jsonl 2>/dev/null)\" ]"
   named_launch '' 'herdr_spawn_a=()' "$condition" "herdr_spawn_a=(--resume $uuid)" "$command" "$launch" \
     'could not set the Claude session color; starting without it'
 }

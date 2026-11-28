@@ -38,6 +38,8 @@ case ${TEST_CLAUDE_WRAPPER:-} in
 esac
 opencode() { TEST_VIA=wrapper command opencode --auto "$@"; }
 alias omp='TEST_VIA=alias omp'
+# As where an interactive shell aliases find to a tool that takes other options.
+alias find=false
 if [[ ${TEST_CODEX_WRAPPER:-0} == 1 ]]; then
   codex() { TEST_VIA=wrapper command codex "$@"; }
 fi
@@ -63,6 +65,12 @@ case "$app:${1:-}" in
   claude:-p)
     sleep "${TEST_STEP_DELAY:-0}"
     color=${!#}
+    # The session ID is the argument before the command. Claude Code saves the session under it.
+    if [[ ${TEST_CLAUDE_EXIT:-0} == 0 && ${TEST_CLAUDE_NO_TRANSCRIPT:-0} != 1 ]]; then
+      projects=${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
+      mkdir -p "$projects/child"
+      : >"$projects/child/${@:$#-1:1}.jsonl"
+    fi
     printf '%s\n' "${TEST_CLAUDE_RESPONSE:-Session color set to: ${color#/color }}"
     exit "${TEST_CLAUDE_EXIT:-0}"
     ;;
@@ -120,6 +128,7 @@ cat >"$tmp/timeout/timeout" <<'SH'
 #!/usr/bin/env bash
 set -eu
 jq -cn '$ARGS.positional' --args -- "$@" >>"$TEST_TIMEOUTS"
+[[ $1 != -k ]] || shift 2
 [[ ${TEST_CLAUDE_HANG:-0} != 1 || $2 != claude ]] || exit 124
 shift
 exec "$@"
@@ -456,11 +465,11 @@ check_claude_fallback() {
 check_claude_bounded() {
   check_claude
   # The last run opened a tab, whose naming calls `timeout` too.
-  jq -es --slurpfile calls "$TEST_CALLS" 'map(select(.[1] == "claude")) == [["20", "claude"] + $calls[0].argv]' \
-    "$TEST_TIMEOUTS" >/dev/null
+  jq -es --slurpfile calls "$TEST_CALLS" \
+    'map(select(index("claude"))) == [["-k", "5", "20", "claude"] + $calls[0].argv]' "$TEST_TIMEOUTS" >/dev/null
   TEST_CLAUDE_HANG=1 run_spawn claude cc-hung "$prompt"
   calls 'map(.argv) == [["-n", "cc-hung", $brief]]'
-  jq -es 'length == 1 and .[0][:3] == ["20", "claude", "-p"]' "$TEST_TIMEOUTS" >/dev/null
+  jq -es 'length == 1 and .[0][:5] == ["-k", "5", "20", "claude", "-p"]' "$TEST_TIMEOUTS" >/dev/null
   grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
 }
 # A function or alias cannot be time-limited, so it gets no color call.
@@ -469,13 +478,29 @@ check_claude_wrapped() {
   for wrapper in function:wrapper alias:alias; do
     TEST_CLAUDE_WRAPPER=${wrapper%:*} run_spawn claude cc-wrapped "$prompt"
     calls --arg via "${wrapper#*:}" 'map([.via, .argv]) == [[$via, ["-n", "cc-wrapped", $brief]]]'
-    jq -es 'all(.[]; .[1] != "claude")' "$TEST_TIMEOUTS" >/dev/null
+    jq -es 'all(.[]; index("claude") == null)' "$TEST_TIMEOUTS" >/dev/null
     grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
   done
+}
+# Without a saved transcript there is nothing to resume. It is looked up where the child shell keeps it, through a
+# linked projects directory too.
+check_claude_transcript() {
+  rm -rf -- "$CLAUDE_CONFIG_DIR/projects/child"
+  TEST_CLAUDE_NO_TRANSCRIPT=1 run_spawn claude cc-unsaved "$prompt"
+  calls 'length == 2 and .[0].argv[0] == "-p" and .[1].argv == ["-n", "cc-unsaved", $brief]'
+  grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
+  rm -rf -- "$tmp/linked-config" "$tmp/linked-projects"
+  mkdir "$tmp/linked-config" "$tmp/linked-projects"
+  ln -s "$tmp/linked-projects" "$tmp/linked-config/projects"
+  CLAUDE_CONFIG_DIR="$tmp/linked-config" check_claude
+  (unset CLAUDE_CONFIG_DIR; check_claude)
+  [[ -f $HOME/.claude/projects/child/$uuid.jsonl ]]
+  rm -r -- "$HOME/.claude"
 }
 check_claude_bounded
 check_claude_wrapped
 check_claude_fallback
+check_claude_transcript
 TEST_TUI_EXIT=1 run_spawn claude cc-exit "$prompt"
 check_claude_color cc-exit red
 printf '%s\n' 'PASS: a plain claude colors a new session under a time limit; a wrapper or failure starts one plain TUI'
@@ -670,8 +695,8 @@ check_opencode_fallback() {
   done
 }
 check_opencode
-jq -es 'map(select(.[1] == "opencode")) | length == 1 and .[0][:4] == ["20", "opencode", "api", "--standalone"]' \
-  "$TEST_TIMEOUTS" >/dev/null
+jq -es 'map(select(index("opencode"))) | length == 1
+  and .[0][:6] == ["-k", "5", "20", "opencode", "api", "--standalone"]' "$TEST_TIMEOUTS" >/dev/null
 check_opencode_fallback
 TEST_OC_EXIT=1 run_spawn --task complex opencode oc-routed "$prompt"
 calls '.[1].argv == ["--auto", "--standalone", "--prompt", $brief] and (.[1].config | endswith("/opencode.json"))'
@@ -758,6 +783,7 @@ if command -v zsh >/dev/null; then
   check_claude_bounded
   check_claude_wrapped
   check_claude_fallback
+  check_claude_transcript
   TEST_APP=codex check_codex
   TEST_APP=codex check_codex_fallback
   check_codex_app
@@ -792,8 +818,8 @@ check_request() { # <name> <color>
 check_notice() { # <name> <color>
   [[ $(grep -c 'coordinator name' "$err") -eq 1 ]]
   grep -Fq "coordinator name $1 and color $2 requested for this session, not applied yet" "$err"
-  grep -Fq "when this turn ends" "$err"
-  grep -Fq "ask the user to type /rename $1 and /color $2, whichever this session lacks" "$err"
+  grep -Fq "Tell the user now, once: if this session's name and color have not changed when this turn ends" "$err"
+  grep -Fq "they can type /rename $1 and /color $2, whichever it lacks" "$err"
 }
 check_silent() { if grep -Fq 'coordinator name' "$err"; then return 1; fi; }
 

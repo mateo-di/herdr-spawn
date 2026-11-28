@@ -88,8 +88,10 @@ async function bootstrap(objective) {
         // Respect the server's configured feature setting. Disable goals only in
         // this temporary runtime so the resumed TUI owns the first turn.
         const cwd = process.cwd();
+        // Starting a writable thread trusts the folder and runs its MCP servers before the user is asked.
+        // Naming needs no write access, and the TUI applies the user's own sandbox on resume.
         const { thread } = (await request('thread/start', {
-          cwd, ephemeral: false, ...(lane ? { config: { 'features.goals': false } } : {}),
+          cwd, ephemeral: false, ...(lane ? { config: { 'features.goals': false } } : { sandbox: 'read-only' }),
           ...(model === undefined ? {} : { model }),
         })) ?? {};
         if (!thread || thread.ephemeral !== false || thread.cwd !== cwd ||
@@ -98,6 +100,7 @@ async function bootstrap(objective) {
           throw new Error('thread/start did not return a saved thread in the child cwd');
         }
         const threadId = thread.id;
+        let namingFailed = false;
         if (lane) {
           await request('thread/goal/set', { threadId, objective, origin: 'automatic', status: 'active' });
           const { goal: saved } = (await request('thread/goal/get', { threadId })) ?? {};
@@ -111,12 +114,20 @@ async function bootstrap(objective) {
               throw new Error('naming timed out after 5s');
             })]);
           } catch (error) {
+            namingFailed = true;
             console.error(`codex-lane: could not name thread ${threadId}, continuing: ${error.message}`);
           }
         } else await setName(threadId);
         server.stdin.end();
+        // A server that failed to name may never exit, or exit nonzero for it: the saved goal decides instead.
+        // A launcher's child can hold the pipe past the kill, which would keep the exit pending.
+        const killer = namingFailed ? setTimeout(() => {
+          server.kill('SIGKILL');
+          server.stdout.destroy();
+        }, 5_000) : undefined;
         const { code, signal } = await exit;
-        if (code !== 0) throw new Error(`Codex app-server exited with ${signal ?? code}`);
+        clearTimeout(killer);
+        if (!namingFailed && code !== 0) throw new Error(`Codex app-server exited with ${signal ?? code}`);
         if (!existsSync(thread.path)) throw new Error(`Codex did not save the rollout for ${threadId}`);
         if (!lane) return thread;
         const events = rolloutEvents(thread.path);

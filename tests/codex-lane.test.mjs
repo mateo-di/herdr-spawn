@@ -48,6 +48,7 @@ const fakeCodex = `#!/usr/bin/env node
 const assert = require('node:assert/strict');
 const { appendFileSync, existsSync, writeFileSync } = require('node:fs');
 const { createInterface } = require('node:readline');
+const { spawn } = require('node:child_process');
 const { join } = require('node:path');
 const args = process.argv.slice(2);
 const [command] = args;
@@ -80,7 +81,7 @@ if (command === 'resume') {
   assert.deepEqual(args, ['app-server', ...(nameOnly ? [] : ['-c', '${inheritShell}']), '--listen', 'stdio://']);
   let named;
   let stored;
-  process.stdin.on('end', () => { if (process.env.FAKE === 'bad-exit') process.exit(3); });
+  process.stdin.on('end', () => { if (['bad-exit', 'name-error-exit'].includes(process.env.FAKE)) process.exit(3); });
   createInterface({ input: process.stdin }).on('line', line => {
     const { id: requestId, method, params } = JSON.parse(line);
     const write = message => process.stdout.write(JSON.stringify(message) + '\\n');
@@ -88,17 +89,25 @@ if (command === 'resume') {
     if (method === 'initialize') reply({});
     else if (method === 'initialized') write({ method: 'irrelevant/notification' });
     else if (method === 'thread/start') {
+      // Only a thread that gets no goal is started read-only.
       assert.deepEqual(params, {
-        cwd: lane, ephemeral: false, ...(nameOnly ? {} : { config: { 'features.goals': false } }), ...(model ? { model } : {}),
+        cwd: lane, ephemeral: false,
+        ...(nameOnly ? { sandbox: 'read-only' } : { config: { 'features.goals': false } }), ...(model ? { model } : {}),
       });
       reply({ thread: { id, path: rollout, cwd: lane, ephemeral: false } });
     } else if (method === 'thread/name/set') {
       assert.deepEqual(params, { threadId: id, name: expectedName });
-      if (process.env.FAKE === 'name-error') {
+      if (process.env.FAKE === 'name-held') {
+        // As behind a launcher: another process keeps the output pipe open after this one is gone.
+        spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 'inherit', 'ignore'] }).unref();
+      }
+      if (['name-error', 'name-error-exit', 'name-held'].includes(process.env.FAKE)) {
         write({ id: requestId, error: { message: 'name could not be set' } });
         return;
       }
-      if (process.env.FAKE === 'name-hang') return;
+      // A stuck server outlives the end of its input.
+      if (process.env.FAKE === 'name-stuck') setInterval(() => {}, 1000);
+      if (['name-hang', 'name-stuck'].includes(process.env.FAKE)) return;
       named = params.name;
       // A lane's rollout comes from its goal.
       if (nameOnly && process.env.FAKE !== 'not-saved') writeFileSync(rollout, '');
@@ -185,11 +194,14 @@ for (const [scenario, message] of [
   ['wrong-name', /thread\/read did not return the matching name/],
   ['wrong-named-thread', /thread\/read did not return the matching name/],
   ['name-hang', /naming timed out/],
+  ['name-stuck', /naming timed out/],
+  ['name-error-exit', /name could not be set/],
+  ['name-held', /name could not be set/],
 ]) {
   test(`a lane warns and still pursues its goal when naming fails: ${scenario}`, async t => {
     const { root, startup, exit, warnings } = await withFake(t, scenario);
-    // Longer than the helper's own limit on naming.
-    assert.equal(await waitForFile(join(root, 'resumed'), 10_000), id);
+    // Longer than the helper's limits on naming and then on the server's exit, within its startup limit.
+    assert.equal(await waitForFile(join(root, 'resumed'), 20_000), id);
     await writeFile(join(root, 'finish'), '');
     assert.equal(await waitForFile(join(startup, 'result')), `ready ${id}`);
     assert.match(warnings(), /could not name thread .*, continuing: /);
@@ -454,6 +466,25 @@ test('Codex 0.171.0 saves a named thread in name-only mode', { skip: !real, time
   const index = (await readFile(join(env.CODEX_HOME, 'session_index.jsonl'), 'utf8')).trimEnd()
     .split('\n').map(line => JSON.parse(line));
   assert.ok(index.some(entry => entry.id === stdout.trim() && entry.thread_name === name), 'the name was not saved');
+});
+
+test('Codex 0.171.0 name-only mode neither trusts a repository nor runs its MCP servers', { skip: !real, timeout: 35_000 }, async t => {
+  const { root } = await fixture(t);
+  const env = await realCodexEnv(root);
+  const repo = join(root, 'repo');
+  const marker = join(root, 'mcp-ran');
+  await mkdir(join(repo, '.codex'), { recursive: true });
+  await run('git', ['init', '-q'], { cwd: repo, env });
+  await writeFile(join(repo, '.codex', 'config.toml'),
+    `[mcp_servers.marker]\ncommand = "touch"\nargs = [${JSON.stringify(marker)}]\n`);
+  const config = join(env.CODEX_HOME, 'config.toml');
+  await writeFile(config,
+    `sandbox_mode = "workspace-write"\n${localProvider('http://127.0.0.1:0/v1')}[features]\nplugins = false\n`);
+  const { stdout } = await run(process.execPath, [helper, '--name-only', name], { cwd: repo, env, timeout: 30_000 });
+  assert.match(stdout, /^[\da-f-]{36}\n$/);
+  await delay(2000); // An MCP server starts in the background.
+  assert.doesNotMatch(await readFile(config, 'utf8'), /trust_level/);
+  await assert.rejects(readFile(marker), { code: 'ENOENT' });
 });
 
 test('Codex 0.171.0 refuses lane startup when the user disables goals', { skip: !real, timeout: 35_000 }, async t => {
