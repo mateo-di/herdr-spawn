@@ -19,7 +19,7 @@ Open every pane and tab through `spawn.sh`, which picks the surface and your spa
 
 ## Agents
 
-`scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
+`scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them. Built-in launches also give the child `<name>` as its native session name, and Claude children a prompt-bar color; if that fails the child starts anyway with a warning in its pane (README).
 
 Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent; lanes use the key `lane:<agent>`. Besides `{name}` and `{prompt}`, templates take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted. Example:
 

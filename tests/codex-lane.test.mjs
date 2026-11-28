@@ -14,6 +14,7 @@ const helper = fileURLToPath(new URL('../skills/herdr-spawn/scripts/codex-lane.m
 const spawnScript = fileURLToPath(new URL('../skills/herdr-spawn/scripts/spawn.sh', import.meta.url));
 const run = promisify(execFile);
 const id = '019abcde-0123-7123-8000-0123456789ab';
+const name = 'codex_child-1';
 const goal = 'Check "$HOME" and $(false).\nDone when it is verified.';
 const inheritShell = 'shell_environment_policy.inherit=all';
 
@@ -24,7 +25,10 @@ async function fixture(t) {
   const brief = join(root, `brief "$HOME" $(false) 'Ω'.md`);
   await mkdir(startup);
   await writeFile(brief, 'Test brief');
-  const env = { ...process.env, HERDR_PANE_ID: 'child', LANE_MODE: 'unit', LANE_COORDINATOR: 'parent' };
+  const env = {
+    ...process.env, HERDR_PANE_ID: 'child', LANE_MODE: 'unit', LANE_COORDINATOR: 'parent',
+    HOME: root, CLAUDE_CONFIG_DIR: join(root, 'claude'), CLAUDE_CODE_SESSION_ID: '',
+  };
   return { root, startup, brief, env };
 }
 
@@ -50,6 +54,8 @@ const [command] = args;
 const model = process.env.FAKE_MODEL;
 const lane = process.cwd();
 const id = process.env.FAKE_THREAD_ID ?? '${id}';
+const expectedName = process.env.FAKE_THREAD_NAME ?? '${name}';
+const nameOnly = process.env.FAKE_NAME_ONLY === '1';
 const rollout = join(lane, 'rollout.jsonl');
 const finish = join(lane, 'finish');
 const event = payload => appendFileSync(rollout, JSON.stringify({ type: 'event_msg', payload }) + '\\n');
@@ -71,8 +77,10 @@ if (command === 'resume') {
     }, 25);
   }, 25);
 } else {
-  assert.deepEqual(args, ['app-server', '-c', '${inheritShell}', '--listen', 'stdio://']);
+  assert.deepEqual(args, ['app-server', ...(nameOnly ? [] : ['-c', '${inheritShell}']), '--listen', 'stdio://']);
+  let named;
   let stored;
+  process.stdin.on('end', () => { if (process.env.FAKE === 'bad-exit') process.exit(3); });
   createInterface({ input: process.stdin }).on('line', line => {
     const { id: requestId, method, params } = JSON.parse(line);
     const write = message => process.stdout.write(JSON.stringify(message) + '\\n');
@@ -80,9 +88,29 @@ if (command === 'resume') {
     if (method === 'initialize') reply({});
     else if (method === 'initialized') write({ method: 'irrelevant/notification' });
     else if (method === 'thread/start') {
-      assert.deepEqual(params, { cwd: lane, ephemeral: false, config: { 'features.goals': false }, ...(model ? { model } : {}) });
+      assert.deepEqual(params, {
+        cwd: lane, ephemeral: false, ...(nameOnly ? {} : { config: { 'features.goals': false } }), ...(model ? { model } : {}),
+      });
       reply({ thread: { id, path: rollout, cwd: lane, ephemeral: false } });
+    } else if (method === 'thread/name/set') {
+      assert.deepEqual(params, { threadId: id, name: expectedName });
+      if (process.env.FAKE === 'name-error') {
+        write({ id: requestId, error: { message: 'name could not be set' } });
+        return;
+      }
+      named = params.name;
+      // A lane's rollout comes from its goal.
+      if (nameOnly && process.env.FAKE !== 'not-saved') writeFileSync(rollout, '');
+      reply({});
+    } else if (method === 'thread/read') {
+      assert.deepEqual(params, { threadId: id, includeTurns: false });
+      writeFileSync(join(lane, 'name-read'), named);
+      reply({ thread: {
+        id: process.env.FAKE === 'wrong-named-thread' ? 'different-id' : id,
+        name: process.env.FAKE === 'wrong-name' ? named.toUpperCase() : named,
+      } });
     } else if (method === 'thread/goal/set') {
+      assert.ok(!nameOnly);
       assert.equal(params.threadId, id);
       assert.equal(params.status, 'active');
       assert.equal(params.origin, 'automatic');
@@ -105,17 +133,19 @@ if (command === 'resume') {
 async function withFake(t, scenario) {
   const f = await fixture(t);
   await executable(join(f.root, 'codex'), fakeCodex);
-  const proc = spawn(process.execPath, [helper, f.startup, f.brief, goal], {
+  const proc = spawn(process.execPath, [helper, f.startup, f.brief, goal, name], {
     cwd: f.root,
     env: { ...f.env, PATH: `${f.root}:${f.env.PATH}`, FAKE: scenario },
     stdio: ['ignore', 'ignore', 'pipe'],
     detached: true,
   });
   const exit = once(proc, 'close');
+  let stderr = '';
+  proc.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
   t.after(() => {
     if (proc.exitCode === null && proc.signalCode === null) process.kill(-proc.pid, 'SIGTERM');
   });
-  return { ...f, exit };
+  return { ...f, exit, warnings: () => stderr };
 }
 
 async function executable(path, source) {
@@ -124,8 +154,10 @@ async function executable(path, source) {
 }
 
 test('acknowledges only a native goal turn in the exact saved thread', async t => {
-  const { root, startup, brief, exit } = await withFake(t, 'ok');
+  const { root, startup, brief, exit, warnings } = await withFake(t, 'ok');
   assert.equal(await waitForFile(join(root, 'resumed')), id);
+  assert.equal(await readFile(join(root, 'name-read'), 'utf8'), name);
+  assert.equal(warnings(), '');
   const event = JSON.parse(await readFile(join(root, 'rollout.jsonl'), 'utf8')).payload;
   assert.equal(event.goal.objective, `${goal}\n\nBefore working, read and follow the lane protocol and brief at ${JSON.stringify(brief)}.`);
   await assert.rejects(readFile(join(startup, 'result')), { code: 'ENOENT' });
@@ -146,6 +178,62 @@ test('an ordinary TUI turn cannot acknowledge native goal startup', async t => {
   assert.match(await waitForFile(join(startup, 'result')), /^error Codex TUI .* exited with 0/);
   assert.deepEqual(await exit, [1, null]);
 });
+
+for (const [scenario, message] of [
+  ['name-error', /thread\/name\/set: name could not be set/],
+  ['wrong-name', /thread\/read did not return the matching name/],
+  ['wrong-named-thread', /thread\/read did not return the matching name/],
+]) {
+  test(`a lane warns and still pursues its goal when naming fails: ${scenario}`, async t => {
+    const { root, startup, exit, warnings } = await withFake(t, scenario);
+    assert.equal(await waitForFile(join(root, 'resumed')), id);
+    await writeFile(join(root, 'finish'), '');
+    assert.equal(await waitForFile(join(startup, 'result')), `ready ${id}`);
+    assert.match(warnings(), /could not name thread .*, continuing: /);
+    assert.match(warnings(), message);
+    await rm(startup, { recursive: true });
+    await writeFile(join(root, 'leave'), '');
+    assert.deepEqual(await exit, [0, null]);
+  });
+}
+
+async function nameOnly(t, scenario, model) {
+  const { root, env } = await fixture(t);
+  await executable(join(root, 'codex'), fakeCodex);
+  const launch = run(process.execPath, [helper, '--name-only', name, ...(model ? [model] : [])], {
+    cwd: root, timeout: 10_000,
+    env: { ...env, PATH: `${root}:${env.PATH}`, FAKE: scenario, FAKE_NAME_ONLY: '1', FAKE_MODEL: model ?? '' },
+  });
+  return { root, launch };
+}
+
+for (const model of [undefined, 'gpt-6.1-terra']) {
+  test(`name-only mode saves a named thread, prints its ID and starts no TUI: ${model ?? 'no model'}`, async t => {
+    const { root, launch } = await nameOnly(t, 'ok', model);
+    assert.deepEqual(await launch, { stdout: `${id}\n`, stderr: '' });
+    assert.equal(await readFile(join(root, 'name-read'), 'utf8'), name);
+    await assert.rejects(readFile(join(root, 'resumed')), { code: 'ENOENT' });
+  });
+}
+
+for (const [scenario, message] of [
+  ['name-error', /thread\/name\/set: name could not be set/],
+  ['wrong-name', /thread\/read did not return the matching name/],
+  ['wrong-named-thread', /thread\/read did not return the matching name/],
+  ['not-saved', /Codex did not save the rollout/],
+  ['bad-exit', /Codex app-server exited with 3/],
+]) {
+  test(`name-only mode fails without printing a thread: ${scenario}`, async t => {
+    const { root, launch } = await nameOnly(t, scenario);
+    await assert.rejects(launch, error => {
+      assert.equal(error.code, 1);
+      assert.equal(error.stdout, '');
+      assert.match(error.stderr, message);
+      return true;
+    });
+    await assert.rejects(readFile(join(root, 'resumed')), { code: 'ENOENT' });
+  });
+}
 
 for (const [scenario, message] of [
   ['rpc-error', /thread\/goal\/set: goals feature is disabled/],
@@ -219,7 +307,7 @@ switch (noun + ' ' + verb) {
         env: {
           ...env, PATH: `${root}:${env.PATH}`, HERDR_ENV: '1', HERDR_PANE_ID: 'parent',
           XDG_STATE_HOME: join(root, 'state'), HERDR_SPAWN_CONFIG: join(root, 'no-override'),
-          FAKE_HERDR_ROOT: root, FAKE_THREAD_ID: threadId, FAKE: 'ok', FAKE_MODEL: model,
+          FAKE_HERDR_ROOT: root, FAKE_THREAD_ID: threadId, FAKE_THREAD_NAME: name, FAKE: 'ok', FAKE_MODEL: model,
         },
       });
       const [{ stdout }] = await Promise.all([launching, (async () => {
@@ -228,6 +316,7 @@ switch (noun + ' ' + verb) {
         await writeFile(join(lane, 'finish'), '');
       })()]);
       assert.equal(stdout.trim(), `p-${name} ${name} codex working`);
+      assert.equal(await readFile(join(lane, 'name-read'), 'utf8'), name);
       const goalEvent = JSON.parse((await readFile(join(lane, 'rollout.jsonl'), 'utf8')).split('\n')[0]).payload;
       assert.equal(goalEvent.goal.threadId, threadId);
       assert.ok(goalEvent.goal.objective.startsWith(`${objective}\n\n`));
@@ -305,7 +394,7 @@ trust_level = "trusted"
 `);
   const shellQuote = arg => `'${arg.replaceAll("'", "'\\''")}'`;
   const requestedModel = 'gpt-5.4-mini';
-  const command = [process.execPath, helper, startup, brief, goal, requestedModel].map(shellQuote).join(' ');
+  const command = [process.execPath, helper, startup, brief, goal, name, requestedModel].map(shellQuote).join(' ');
   const pidFile = join(root, 'pty-pid');
   const launch = `stty rows 40 cols 120; echo "$$" > ${shellQuote(pidFile)}; exec ${command}`;
   const pty = spawn('script', ['-q', '-e', '-c', launch, '/dev/null'], {
@@ -352,12 +441,24 @@ trust_level = "trusted"
   }
 });
 
+test('Codex 0.171.0 saves a named thread in name-only mode', { skip: !real, timeout: 35_000 }, async t => {
+  const { root } = await fixture(t);
+  const env = await realCodexEnv(root);
+  await writeFile(join(env.CODEX_HOME, 'config.toml'),
+    `${localProvider('http://127.0.0.1:0/v1')}[features]\nplugins = false\n`);
+  const { stdout } = await run(process.execPath, [helper, '--name-only', name], { cwd: root, env, timeout: 30_000 });
+  assert.match(stdout, /^[\da-f-]{36}\n$/);
+  const index = (await readFile(join(env.CODEX_HOME, 'session_index.jsonl'), 'utf8')).trimEnd()
+    .split('\n').map(line => JSON.parse(line));
+  assert.ok(index.some(entry => entry.id === stdout.trim() && entry.thread_name === name), 'the name was not saved');
+});
+
 test('Codex 0.171.0 refuses lane startup when the user disables goals', { skip: !real, timeout: 35_000 }, async t => {
   const { root, startup, brief } = await fixture(t);
   const env = await realCodexEnv(root);
   await writeFile(join(env.CODEX_HOME, 'config.toml'),
     `${localProvider('http://127.0.0.1:0/v1')}[features]\ngoals = false\nplugins = false\n`);
-  const proc = spawn(process.execPath, [helper, startup, brief, goal], {
+  const proc = spawn(process.execPath, [helper, startup, brief, goal, name], {
     cwd: root, env, detached: true, stdio: 'ignore',
   });
   const exit = once(proc, 'close');

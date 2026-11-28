@@ -25,6 +25,11 @@ const flag = k => args.includes(k) ? args[args.indexOf(k) + 1] : undefined;
 const values = k => args.flatMap((x, i) => x === k ? [args[i + 1]] : []);
 const kv = x => [x.slice(0, x.indexOf('=')), x.slice(x.indexOf('=') + 1)];
 const find = key => Object.values(db).find(row => row.id === key || row.name === key);
+// The launch line does not run here, so mark startup for it as it would before opening its TUI.
+const markReady = line => {
+  const [, result] = line.match(/ready > (\\S+\\/result);/) ?? [];
+  if (result) fs.writeFileSync(result, 'ready\\n');
+};
 const create = (label, parent) => {
   const seq = Object.keys(db).length + 1;
   const tab = parent?.tab ?? 'tab' + seq;
@@ -67,6 +72,7 @@ switch (basename(process.argv[1])) {
         row.name = row.label;
         row.parent = flag('--parent');
         row.line = args.at(-1);
+        markReady(row.line);
         row.labels = Object.fromEntries(values('--label').map(kv));
         if (row.labels.lane_mode) assert.equal(row.labels.goal_startup, 'pending');
         save();
@@ -131,6 +137,7 @@ switch (basename(process.argv[1])) {
         if (db[c].sources['herdr-spawn-goal']) assert.equal(db[c].sources['herdr-spawn-goal'].goal_startup, 'pending');
         if (process.env.GOAL_FAIL === '1') no();
         db[c].line = args[3];
+        markReady(args[3]);
         save();
         break;
       case 'agent rename':
@@ -177,6 +184,7 @@ for (const surface of ['herdr', 'hc']) {
       HC_SOCKET: 'mock-socket', HC_SESSION: 'mock-session',
       HERDR_SPAWN_CONFIG: conf, XDG_STATE_HOME: state, SHELL: '/bin/bash', OPENCODE_CONFIG_CONTENT: '',
       HERDR_SPAWN_REPORT_DIR: reportDir, GOAL_MOCK_SENT: join(root, 'sent'),
+      HOME: root, CLAUDE_CONFIG_DIR: join(root, 'claude'), CLAUDE_CODE_SESSION_ID: '',
     };
     const invoke = (script, args, extra = {}) =>
       run('bash', [join(scripts, script), ...args], { cwd: root, env: { ...env, ...extra }, timeout: 10_000 });
@@ -496,6 +504,7 @@ async function restoreFixture(t) {
     XDG_STATE_HOME: state, SHELL: '/bin/bash', WATCH_LOG: watchlog,
     HERDR_SPAWN_CONFIG: join(root, 'agents.conf'), OPENCODE_CONFIG_CONTENT: '',
     HERDR_SPAWN_REPORT_DIR: join(root, 'reports'),
+    HOME: root, CLAUDE_CONFIG_DIR: join(root, 'claude'), CLAUDE_CODE_SESSION_ID: '',
   };
   const report = join(root, 'report.md');
   await writeFile(report, 'Test report');
