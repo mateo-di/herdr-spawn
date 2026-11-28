@@ -20,7 +20,17 @@ async function recorded($, path) {
   return found
 }
 
-async function apply($) {
+// The commands that would fill what the session does not have yet.
+async function missingFrom($, request) {
+  // An unreadable transcript rejects here: what cannot be checked is not set.
+  const has = await recorded($, (await $.session.info()).transcriptPath)
+  const missing = []
+  if (!has.name && /^coord-[A-Za-z0-9._-]+$/.test(request.name)) missing.push({ command: 'rename', args: request.name })
+  if (!has.color && colors.includes(request.color)) missing.push({ command: 'color', args: request.color })
+  return missing
+}
+
+async function apply($, turn) {
   const id = await $.session.id()
   const state = (await $.env.get('XDG_STATE_HOME')) || `${await $.env.get('HOME')}/.local/state`
   const path = `${state}/herdr-spawn/identity/${id}.json`
@@ -29,12 +39,19 @@ async function apply($) {
   if (request.sessionId !== id || request.done) return
   // A -p run draws nowhere; it may be a second process on a session someone has open.
   if (!(await $.session.surfaces()).length) return
-  // An unreadable transcript rejects here: what cannot be checked is not set.
-  const has = await recorded($, (await $.session.info()).transcriptPath)
-  if (!has.name && /^coord-[A-Za-z0-9._-]+$/.test(request.name)) {
-    await $.command.run({ command: 'rename', args: request.name })
+  for (const call of await missingFrom($, request)) {
+    // Once per session, so a command Claude Code refuses is not repeated after every turn.
+    const asked = `${id} ${call.command}`
+    if (turn.asked.has(asked)) continue
+    // The user can set either one while a turn runs: one that started since the transcript was read leaves the
+    // rest to a fresh look after it.
+    if (turn.running) return
+    await $.command.run(call)
+    turn.asked.add(asked)
   }
-  if (!has.color && colors.includes(request.color)) await $.command.run({ command: 'color', args: request.color })
+  // A refusal is not an error, so only the transcript tells. Until it records both, the request stays pending and
+  // spawn.sh keeps telling the user.
+  if ((await missingFrom($, request)).length) return
   await $.fs.write(path, `${JSON.stringify({ ...request, done: true })}\n`)
 }
 
@@ -44,7 +61,7 @@ function whenIdle($, turn) {
     if (turn.running || turn.applying) return
     turn.applying = true
     try {
-      await apply($)
+      await apply($, turn)
     } catch (error) {
       $.ui.log(`herdr-spawn: could not set the coordinator identity: ${error.message}`, { to: 'debug' })
     } finally {
@@ -54,7 +71,7 @@ function whenIdle($, turn) {
 }
 
 export function register(on) {
-  const turn = { running: false, applying: false }
+  const turn = { running: false, applying: false, asked: new Set() }
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)

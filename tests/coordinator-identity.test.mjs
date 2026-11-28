@@ -14,9 +14,23 @@ const row = value => `${JSON.stringify(value)}\n`;
 const message = text => row({ type: 'user', sessionId: id, message: text });
 const title = row({ type: 'custom-title', customTitle: 'mine', sessionId: id });
 const color = row({ type: 'agent-color', agentColor: 'red', sessionId: id });
+// The row each command leaves in the transcript.
+const recordOf = {
+  rename: customTitle => row({ type: 'custom-title', customTitle, sessionId: id }),
+  color: agentColor => row({ type: 'agent-color', agentColor, sessionId: id }),
+};
 
 function host({ transcript = message('hello'), stored = request, path = requestPath,
-  env = { XDG_STATE_HOME: '/state', HOME: '/home/someone' }, surfaces = ['terminal'], reject } = {}) {
+  env = { XDG_STATE_HOME: '/state', HOME: '/home/someone' }, surfaces = ['terminal'], reject, refuse = [],
+  turnDuring } = {}) {
+  // Each happens once: a command that rejects, and a turn that starts while the mod waits on the named host call.
+  let rejecting = reject;
+  let interrupting = turnDuring;
+  const during = async call => {
+    if (call !== interrupting) return;
+    interrupting = undefined;
+    await fire('turn.start');
+  };
   const files = new Map();
   if (stored) files.set(path, Buffer.from(row(stored)));
   if (transcript !== null) files.set(transcriptPath, Buffer.from(transcript));
@@ -29,17 +43,30 @@ function host({ transcript = message('hello'), stored = request, path = requestP
     if (!files.has(name)) throw new Error(`no such file: ${name}`);
     return files.get(name);
   };
+  let current = { id, transcriptPath, path };
+  const append = text =>
+    files.set(current.transcriptPath, Buffer.concat([file(current.transcriptPath), Buffer.from(text)]));
+  // As /clear does: the module stays, under a new session ID with its own transcript and request.
+  function clear(next) {
+    current = { id: next.sessionId, transcriptPath: `/transcripts/${next.sessionId}.jsonl`,
+      path: `/state/herdr-spawn/identity/${next.sessionId}.json` };
+    files.set(current.transcriptPath, Buffer.from(message('cleared')));
+    files.set(current.path, Buffer.from(row(next)));
+  }
   const $ = {
     clock: { after: (ms, callback) => { timers.push(callback); } },
     env: { get: async name => env[name] },
     session: {
-      id: async () => id,
-      info: async () => ({ transcriptPath }),
+      id: async () => current.id,
+      info: async () => ({ transcriptPath: current.transcriptPath }),
       surfaces: async () => surfaces,
     },
     fs: {
       exists: async name => files.has(name),
-      stat: async name => ({ size: file(name).length }),
+      stat: async name => {
+        await during('stat');
+        return { size: file(name).length };
+      },
       read: async (name, { offset = 0, length } = {}) => {
         const data = file(name);
         return data.subarray(offset, length === undefined ? data.length : offset + length).toString();
@@ -50,9 +77,15 @@ function host({ transcript = message('hello'), stored = request, path = requestP
       },
     },
     command: {
+      // A refused command resolves like any other; only the transcript lacks its row.
       run: async call => {
-        if (call.command === reject) throw new Error('command refused');
+        if (call.command === rejecting) {
+          rejecting = undefined;
+          throw new Error('command rejected');
+        }
         commands.push(call);
+        if (!refuse.includes(call.command)) append(recordOf[call.command](call.args));
+        await during(call.command);
       },
     },
     ui: { log: text => { logs.push(text); } },
@@ -70,8 +103,12 @@ function host({ transcript = message('hello'), stored = request, path = requestP
     await fire('session.start');
     await elapse();
   }
-  const saved = () => JSON.parse(files.get(path).toString());
-  return { fire, elapse, start, saved, commands, writes, logs };
+  const saved = () => JSON.parse(files.get(current.path).toString());
+  async function turn() {
+    await fire('turn.complete');
+    await elapse();
+  }
+  return { fire, elapse, start, turn, append, clear, saved, commands, writes, logs };
 }
 
 test('sets both when the session has neither, then marks the request done', async () => {
@@ -142,8 +179,7 @@ for (const [label, options] of [
   test(`ignores ${label}`, async () => {
     const session = host(options);
     await session.start();
-    await session.fire('turn.complete');
-    await session.elapse();
+    await session.turn();
     assert.deepEqual(session.commands, []);
     assert.deepEqual(session.writes, []);
     assert.deepEqual(session.logs, []);
@@ -173,15 +209,69 @@ test("a subagent's turn does not block", async () => {
   assert.deepEqual(session.commands, both);
 });
 
-test('a rejected command leaves the request to retry', async () => {
-  for (const reject of ['rename', 'color']) {
+test('a rejected command is retried after a later turn', async () => {
+  for (const [reject, before] of [['rename', []], ['color', [both[0]]]]) {
     const session = host({ reject });
     await session.start();
+    assert.deepEqual(session.commands, before);
     assert.deepEqual(session.saved(), request);
     assert.deepEqual(session.writes, []);
-    assert.match(session.logs.join('\n'), /command refused/);
+    assert.match(session.logs.join('\n'), /command rejected/);
+    await session.turn();
+    assert.deepEqual(session.commands, both);
+    assert.equal(session.saved().done, true);
   }
 });
+
+for (const refuse of [['rename'], ['color'], ['rename', 'color']]) {
+  test(`a refused command is not asked again and the request stays pending: ${refuse.join(' and ')}`, async () => {
+    const session = host({ refuse });
+    await session.start();
+    await session.turn();
+    for (const command of refuse) {
+      await session.turn();
+      assert.deepEqual(session.commands, both);
+      assert.deepEqual(session.saved(), request);
+      assert.deepEqual(session.writes, []);
+      // The user types it.
+      session.append(recordOf[command]('mine'));
+    }
+    await session.turn();
+    assert.deepEqual(session.commands, both);
+    assert.deepEqual(session.saved(), { ...request, done: true });
+    assert.deepEqual(session.writes, [requestPath]);
+    assert.deepEqual(session.logs, []);
+  });
+}
+
+test('a new session in the same module is asked for both again', async () => {
+  const session = host({ refuse: ['rename', 'color'] });
+  await session.start();
+  await session.turn();
+  assert.deepEqual(session.commands, both);
+  const next = { ...request, sessionId: other, name: 'coord-next', color: 'pink' };
+  session.clear(next);
+  await session.turn();
+  await session.turn();
+  assert.deepEqual(session.commands,
+    [...both, { command: 'rename', args: 'coord-next' }, { command: 'color', args: 'pink' }]);
+  assert.deepEqual(session.saved(), next);
+  assert.deepEqual(session.writes, []);
+});
+
+// During the stat the user names the session in the new turn; during /rename the command itself has done so.
+for (const [turnDuring, before, typed] of [['stat', [], title], ['rename', [both[0]], '']]) {
+  test(`a turn that starts during ${turnDuring} stops the remaining commands`, async () => {
+    const session = host({ turnDuring });
+    await session.start();
+    assert.deepEqual(session.commands, before);
+    assert.deepEqual(session.writes, []);
+    session.append(typed);
+    await session.turn();
+    assert.deepEqual(session.commands, [...before, both[1]]);
+    assert.equal(session.saved().done, true);
+  });
+}
 
 test('an unreadable transcript runs no command', async () => {
   const session = host({ transcript: null });
