@@ -32,9 +32,10 @@ exec bash --noprofile --rcfile "$TEST_RC" -ic "$2"
 SH
 cat >"$tmp/rc" <<'SH'
 PATH="${TEST_RC%/*}/bin:$PATH"
-if [[ ${TEST_CLAUDE_PLAIN:-0} != 1 ]]; then
-  claude() { TEST_VIA=wrapper command claude "$@"; }
-fi
+case ${TEST_CLAUDE_WRAPPER:-} in
+  function) claude() { TEST_VIA=wrapper command claude "$@"; } ;;
+  alias) alias claude='TEST_VIA=alias claude' ;;
+esac
 opencode() { TEST_VIA=wrapper command opencode --auto "$@"; }
 alias omp='TEST_VIA=alias omp'
 if [[ ${TEST_CODEX_WRAPPER:-0} == 1 ]]; then
@@ -68,7 +69,7 @@ case "$app:${1:-}" in
   opencode:api)
     sleep "${TEST_STEP_DELAY:-0}"
     if [[ -n ${TEST_OC_RESPONSE:-} ]]; then printf '%s\n' "$TEST_OC_RESPONSE"
-    else jq -c '{data: {id: "ses_abc123", title: .title}}' <<<"${!#}"; fi
+    else jq -c '{data: {id: "ses_abc123", title, location}}' <<<"${!#}"; fi
     exit "${TEST_OC_EXIT:-0}"
     ;;
   opencode:--auto)
@@ -430,7 +431,7 @@ uuid=abcdef12-3456-4abc-8abc-123456789abc
 
 check_claude_color() { # <name> <color>
   calls --arg name "$1" --arg color "$2" --arg id "$uuid" '
-    map([.app, .via]) == [["claude", "wrapper"], ["claude", "wrapper"]]
+    map([.app, .via]) == [["claude", ""], ["claude", ""]]
     and .[0].argv == ["-p", "--safe-mode", "--setting-sources", "user", "-n", $name, "--session-id", $id, "/color " + $color]
     and .[1].argv[:2] == ["--resume", $id]'
 }
@@ -449,32 +450,36 @@ check_claude_fallback() {
     export "${failure?}"
     run_spawn claude cc-fallback "$prompt"
     unset "${failure%%=*}"
-    calls 'length == 2 and .[1].argv == ["-n", "cc-fallback", $brief] and .[1].via == "wrapper"'
+    calls 'length == 2 and .[1].argv == ["-n", "cc-fallback", $brief]'
     grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
   done
 }
-# Only a plain executable can run under `timeout`.
 check_claude_bounded() {
   check_claude
   # The last run opened a tab, whose naming calls `timeout` too.
-  jq -es 'all(.[]; .[1] != "claude")' "$TEST_TIMEOUTS" >/dev/null
-  export TEST_CLAUDE_PLAIN=1
-  run_spawn claude cc-bounded "$prompt"
-  calls --arg id "$uuid" 'map(.via) == ["", ""] and .[1].argv == ["--resume", $id, "-n", "cc-bounded", $brief]'
-  jq -es --slurpfile calls "$TEST_CALLS" '. == [["20", "claude"] + $calls[0].argv]' "$TEST_TIMEOUTS" >/dev/null
+  jq -es --slurpfile calls "$TEST_CALLS" 'map(select(.[1] == "claude")) == [["20", "claude"] + $calls[0].argv]' \
+    "$TEST_TIMEOUTS" >/dev/null
   TEST_CLAUDE_HANG=1 run_spawn claude cc-hung "$prompt"
   calls 'map(.argv) == [["-n", "cc-hung", $brief]]'
   jq -es 'length == 1 and .[0][:3] == ["20", "claude", "-p"]' "$TEST_TIMEOUTS" >/dev/null
   grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
-  TEST_CLAUDE_EXIT=1 run_spawn claude cc-failed "$prompt"
-  calls 'length == 2 and .[1].argv == ["-n", "cc-failed", $brief]'
-  unset TEST_CLAUDE_PLAIN
+}
+# A function or alias cannot be time-limited, so it gets no color call.
+check_claude_wrapped() {
+  local wrapper
+  for wrapper in function:wrapper alias:alias; do
+    TEST_CLAUDE_WRAPPER=${wrapper%:*} run_spawn claude cc-wrapped "$prompt"
+    calls --arg via "${wrapper#*:}" 'map([.via, .argv]) == [[$via, ["-n", "cc-wrapped", $brief]]]'
+    jq -es 'all(.[]; .[1] != "claude")' "$TEST_TIMEOUTS" >/dev/null
+    grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
+  done
 }
 check_claude_bounded
+check_claude_wrapped
 check_claude_fallback
 TEST_TUI_EXIT=1 run_spawn claude cc-exit "$prompt"
 check_claude_color cc-exit red
-printf '%s\n' 'PASS: Claude colors a new session under a time limit where it can, falls back with a warning, and starts one TUI'
+printf '%s\n' 'PASS: a plain claude colors a new session under a time limit; a wrapper or failure starts one plain TUI'
 
 TEST_NO_UUIDGEN=1 run_spawn claude cc-proc "$prompt"
 calls '.[1].argv[:2] == ["--resume", "fedcba98-7654-4321-8fed-cba987654321"]'
@@ -526,6 +531,11 @@ printf '%s\n' \
   'claude-equals claude --session-id=abc -n {name} {prompt}' \
   'claude-note claude -n {name} {prompt} # pinned' \
   'claude-semi claude -n {name} {prompt};' \
+  'claude-first claude {prompt}' \
+  'claude-env claude --environment abc -n {name} {prompt}' \
+  'claude-desktop claude --desktop -n {name} {prompt}' \
+  'claude-agents claude agents {prompt}' \
+  'claude-mcp claude  mcp list' \
   'codex codex --custom {prompt}' \
   'opencode opencode --prompt {prompt}' >"$tmp/agents.conf"
 export HERDR_SPAWN_CONFIG="$tmp/agents.conf"
@@ -546,13 +556,24 @@ calls '.[1].argv[2:] == ["-n", "cc-note", $brief]'
 HERDR_ENV=1 HERDR_PANE_ID=p-parent run_spawn claude-semi cc-semi "$prompt" p-target right
 check_claude_color cc-semi red
 calls '.[1].argv[2:] == ["-n", "cc-semi", $brief]'
+run_spawn claude-first cc-first "$prompt"
+check_claude_color cc-first red
+calls '.[1].argv[2:] == [$brief]'
+run_spawn claude-env cc-env "$prompt"
+calls 'map(.argv) == [["--environment", "abc", "-n", "cc-env", $brief]]'
+run_spawn claude-desktop cc-desktop "$prompt"
+calls 'map(.argv) == [["--desktop", "-n", "cc-desktop", $brief]]'
+run_spawn claude-agents cc-agents "$prompt"
+calls 'map(.argv) == [["agents", $brief]]'
+run_spawn claude-mcp cc-mcp "$prompt"
+calls 'map(.argv) == [["mcp", "list"]]'
 run_spawn codex cx-custom "$prompt"
 calls 'map([.app, .argv]) == [["codex", ["--custom", $brief]]]'
 run_spawn opencode oc-custom "$prompt"
 calls 'map(.argv) == [["--auto", "--prompt", $brief]]'
 export HERDR_SPAWN_CONFIG="$tmp/no-config"
 unset BASH_ENV
-printf '%s\n' 'PASS: a custom claude template gets a color unless it selects a session; other custom templates are unchanged'
+printf '%s\n' 'PASS: a custom claude template gets a color unless it runs a subcommand or picks its session; others are unchanged'
 
 export TEST_APP=codex
 helper=$root/skills/herdr-spawn/scripts/codex-lane.mjs
@@ -580,34 +601,68 @@ check_codex_fallback() {
   calls 'map([.app, .via, .argv]) == [["codex", "wrapper", [$brief]]]'
   grep -Fxq 'spawn.sh: could not name the Codex session; starting without a name' "$TEST_PANE"
 }
+run_path() { # <app|tui> <agent> <name>
+  case $1 in
+    app) run_spawn "$2" "$3" "$prompt" ;;
+    tui) HERDR_ENV=1 HERDR_PANE_ID=p-parent run_spawn "$2" "$3" "$prompt" p-target right ;;
+  esac
+}
+# Only a plain `codex` has to be detected as codex, named or not; a wrapper may be detected as anything.
+check_codex_app() {
+  local path late code
+  for path in app:Codex tui:codex; do
+    late=${path#*:} path=${path%:*}
+    for code in 0 1; do
+      TEST_NODE_EXIT=$code TEST_APP=test-agent TEST_APP_LATE=$late run_path "$path" codex cx-late
+      [[ $(wc -l <"$TEST_STATUS") -eq 2 ]]
+    done
+    TEST_CODEX_WRAPPER=1 TEST_APP=wrapped run_path "$path" codex cx-wrapped
+    [[ $(wc -l <"$TEST_STATUS") -eq 1 ]]
+    calls 'map(.via) == ["wrapper"]'
+  done
+}
 check_codex
 check_codex_fallback
 run_spawn "${lane[@]}" --model default codex cx-default "$prompt"
 calls '.[0].argv | length == 4'
-TEST_APP=test-agent TEST_APP_LATE=Codex run_spawn codex cx-late "$prompt"
+TEST_APP=test-agent TEST_APP_LATE=Codex run_spawn "${lane[@]}" codex cx-lane-late "$prompt"
 [[ $(wc -l <"$TEST_STATUS") -eq 2 ]]
+check_codex_app
 unset TEST_APP
-printf '%s\n' 'PASS: Codex resumes the thread the helper named, keeps its launch otherwise, and waits for the codex app'
+printf '%s\n' 'PASS: Codex resumes the thread the helper named, keeps its launch otherwise, and waits for codex when it is plain'
 
 check_opencode() {
+  local dir jq_defs
+  dir=$(pwd -P)
+  # The API call's --data is its last argument.
+  jq_defs='def parsed: map(if .argv[0] == "api" then .argv[-1] |= fromjson else . end);
+    def created($title): {$title, location: {directory: $dir}};'
   run_spawn opencode oc-plain "$prompt"
-  calls 'map([.via, .argv, .config]) == [
-    ["", ["api", "session.create", "--data", "{\"title\":\"oc-plain\"}"], ""],
+  calls --arg dir "$dir" "$jq_defs"'parsed | map([.via, .argv, .config]) == [
+    ["", ["api", "session.create", "--data", created("oc-plain")], ""],
     ["wrapper", ["--auto", "--session", "ses_abc123", "--prompt", $brief], ""]]'
   run_spawn --task complex opencode oc-routed "$prompt"
-  calls 'map(.argv) == [["api", "--standalone", "session.create", "--data", "{\"title\":\"oc-routed\"}"],
+  calls --arg dir "$dir" "$jq_defs"'parsed
+    | map(.argv) == [["api", "--standalone", "session.create", "--data", created("oc-routed")],
       ["--auto", "--standalone", "--session", "ses_abc123", "--prompt", $brief]]
     and (.[0].config | endswith("/opencode.json")) and .[0].config == .[1].config'
   run_spawn "${lane[@]}" opencode oc-lane "$prompt"
-  calls --arg config "$(goal_dir)/opencode.json" --rawfile composed "$(goal_dir)/brief.md" '
-    map(.argv) == [["api", "--standalone", "session.create", "--data", "{\"title\":\"oc-lane\"}"],
+  calls --arg dir "$dir" --arg config "$(goal_dir)/opencode.json" --rawfile composed "$(goal_dir)/brief.md" "$jq_defs"'
+    parsed | map(.argv) == [["api", "--standalone", "session.create", "--data", created("oc-lane")],
       ["--auto", "--standalone", "--session", "ses_abc123", "--prompt", ($composed | sub("\n+$"; ""))]]
     and all(.[]; .config == $config)'
 }
+oc_response() { # <id> <title> <directory>
+  jq -cn --arg id "$1" --arg title "$2" --arg directory "$3" '{data: {$id, $title, location: {$directory}}}'
+}
 check_opencode_fallback() {
-  local failure
-  for failure in 'TEST_OC_RESPONSE={"data":{"id":"ses_bad-id","title":"oc-fallback"}}' \
-    'TEST_OC_RESPONSE={"data":{"id":"ses_abc123","title":"other"}}' TEST_OC_EXIT=1; do
+  local failure dir
+  dir=$(pwd -P)
+  # A bad ID, another title, another directory and no location, then a failed call.
+  for failure in "TEST_OC_RESPONSE=$(oc_response ses_bad-id oc-fallback "$dir")" \
+    "TEST_OC_RESPONSE=$(oc_response ses_abc123 other "$dir")" \
+    "TEST_OC_RESPONSE=$(oc_response ses_abc123 oc-fallback "$HOME")" \
+    'TEST_OC_RESPONSE={"data":{"id":"ses_abc123","title":"oc-fallback"}}' TEST_OC_EXIT=1; do
     export "${failure?}"
     run_spawn opencode oc-fallback "$prompt"
     unset "${failure%%=*}"
@@ -621,18 +676,35 @@ jq -es 'map(select(.[1] == "opencode")) | length == 1 and .[0][:4] == ["20", "op
 check_opencode_fallback
 TEST_OC_EXIT=1 run_spawn --task complex opencode oc-routed "$prompt"
 calls '.[1].argv == ["--auto", "--standalone", "--prompt", $brief] and (.[1].config | endswith("/opencode.json"))'
-# A host without `timeout`.
+# A directory to quote, reached through a link: the session gets the physical path.
+mkdir "$tmp/oc \"dir\" 'with' \$HOME; (x)"
+ln -s "$tmp/oc \"dir\" 'with' \$HOME; (x)" "$tmp/oc-link"
+(cd "$tmp/oc-link"; check_opencode; check_opencode_fallback)
+printf '%s\n' 'PASS: OpenCode titles a session in the child directory and opens it, or warns and keeps its launch'
+
+# A host without `timeout`: nothing but these tools, and perl once it is linked.
 mkdir "$tmp/tools"
 for tool in bash jq dirname awk mktemp mkdir mv rm rmdir seq sleep tr find wc; do
   ln -s "$(command -v "$tool")" "$tmp/tools/$tool"
 done
-PATH="$tmp/bin:$tmp/tools" run_spawn opencode oc-no-timeout "$prompt"
-calls 'length == 2 and .[0].argv[:2] == ["api", "session.create"] and .[0].via == ""'
-grep -Fq 'command opencode api session.create' "$TEST_ARGS"
-TEST_CLAUDE_PLAIN=1 PATH="$tmp/bin:$tmp/tools" run_spawn claude cc-no-timeout "$prompt"
-calls 'length == 2 and .[1].argv[0] == "--resume"'
-if grep -Fq 'timeout 20' "$TEST_ARGS"; then exit 1; fi
-printf '%s\n' 'PASS: OpenCode titles a session past the shell wrapper and opens it, or warns and keeps its launch'
+! command -v zsh >/dev/null || ln -s "$(command -v zsh)" "$tmp/tools/zsh"
+PATH="$tmp/bin:$tmp/tools" run_spawn opencode oc-no-limit "$prompt"
+calls 'map(.argv) == [["--auto", "--prompt", $brief]]'
+grep -Fxq 'spawn.sh: could not create a named OpenCode session; starting with the default title' "$TEST_PANE"
+PATH="$tmp/bin:$tmp/tools" run_spawn claude cc-no-limit "$prompt"
+calls 'map(.argv) == [["-n", "cc-no-limit", $brief]]'
+grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
+ln -s "$(command -v perl)" "$tmp/tools/perl"
+check_perl_limit() {
+  PATH="$tmp/bin:$tmp/tools" run_spawn opencode oc-perl "$prompt"
+  calls 'length == 2 and .[0].argv[:2] == ["api", "session.create"] and .[1].argv[1:3] == ["--session", "ses_abc123"]'
+  grep -Fq "perl -e 'alarm shift; exec @ARGV' 20 opencode api session.create" "$TEST_ARGS"
+  PATH="$tmp/bin:$tmp/tools" run_spawn claude cc-perl "$prompt"
+  calls 'length == 2 and .[0].argv[0] == "-p" and .[1].argv[0] == "--resume"'
+  grep -Fq "perl -e 'alarm shift; exec @ARGV' 20 claude -p" "$TEST_ARGS"
+}
+check_perl_limit
+printf '%s\n' 'PASS: without timeout the naming steps run under a perl limit, and without either the launch is plain'
 
 adapters=$root/adapters/omp
 [[ -f $adapters/herdr-spawn.ts && -f $adapters/herdr-spawn.yml ]]
@@ -685,11 +757,15 @@ printf '%s\n' 'PASS: both app paths and the TUI wait for the startup mark, then 
 if command -v zsh >/dev/null; then
   export TEST_CHILD_ZSH=1 BASH_ENV="$tmp/seed"
   check_claude_bounded
+  check_claude_wrapped
   check_claude_fallback
   TEST_APP=codex check_codex
   TEST_APP=codex check_codex_fallback
+  check_codex_app
   check_opencode
   check_opencode_fallback
+  (cd "$tmp/oc-link"; check_opencode)
+  check_perl_limit
   check_omp
   unset TEST_CHILD_ZSH BASH_ENV
   printf '%s\n' 'PASS: the same launch lines work in an interactive zsh'

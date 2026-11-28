@@ -98,6 +98,7 @@ if (command === 'resume') {
         write({ id: requestId, error: { message: 'name could not be set' } });
         return;
       }
+      if (process.env.FAKE === 'name-hang') return;
       named = params.name;
       // A lane's rollout comes from its goal.
       if (nameOnly && process.env.FAKE !== 'not-saved') writeFileSync(rollout, '');
@@ -183,10 +184,12 @@ for (const [scenario, message] of [
   ['name-error', /thread\/name\/set: name could not be set/],
   ['wrong-name', /thread\/read did not return the matching name/],
   ['wrong-named-thread', /thread\/read did not return the matching name/],
+  ['name-hang', /naming timed out/],
 ]) {
   test(`a lane warns and still pursues its goal when naming fails: ${scenario}`, async t => {
     const { root, startup, exit, warnings } = await withFake(t, scenario);
-    assert.equal(await waitForFile(join(root, 'resumed')), id);
+    // Longer than the helper's own limit on naming.
+    assert.equal(await waitForFile(join(root, 'resumed'), 10_000), id);
     await writeFile(join(root, 'finish'), '');
     assert.equal(await waitForFile(join(startup, 'result')), `ready ${id}`);
     assert.match(warnings(), /could not name thread .*, continuing: /);
