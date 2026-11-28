@@ -1,5 +1,6 @@
 {
-  "description": "Holds herdr-spawn lanes and their coordinator to their roles when they try to stop, keeps a coordinator with active lanes from opening a question dialog, and tracks which of a lane's teammates are still busy.",
+  "description": "Holds herdr-spawn lanes and their coordinator to their roles when they try to stop, keeps a coordinator with active lanes from opening a question dialog, tracks which of a lane's teammates are still busy, and gives a coordinator its name and color.",
+  "modules": ["./coordinator-identity.mjs"],
   "hooks": {
     "PreToolUse": [
       {

@@ -17,6 +17,12 @@
 # --goal "<objective with its done criterion>" is required for lanes and refused otherwise: a lane always has a
 # goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
+# A Claude Code caller of a lane also gets a request in the state dir (identity/<session-id>.json) for the name and
+# color that the plugin's mod gives its session, and a stderr line while that is not done.
+# Built-in claude, codex, opencode and omp children also get <name> as their native session name, and a template
+# starting with `claude ` that selects no session itself gets a prompt-bar color. What needs a step before the TUI
+# runs it in the child shell and falls back to the plain launch with a warning; the child then marks a private
+# startup directory as the TUI starts, so the step's own agent process is not taken for the child.
 # In the Herdr app (HC_TERMINAL_ID set, no HERDR_ENV) it starts the child as an hc terminal of the caller (lane state
 # in hc labels, no watcher), or with <pane-id> <right|down> and no --lane splits that pane through herdr-app, and
 # prints "<terminal> <name> <app> <state>"; see the block below the jq check. With --tab it then names the new tab
@@ -46,11 +52,12 @@ templates() {
     done <"$conf"
   fi
   printf '%s\n' 'claude builtin claude {modelarg} -n {name} {prompt}' 'codex builtin codex {modelarg} {prompt}' \
-    'opencode builtin opencode --prompt {prompt}' 'omp builtin omp {modelarg} {prompt}' \
+    'opencode builtin opencode --prompt {prompt}' \
+    'omp builtin HERDR_SPAWN_SESSION_NAME={name} omp --no-title -e {adapters}/omp/herdr-spawn.ts --config {adapters}/omp/herdr-spawn.yml {modelarg} {prompt}' \
     'lane:claude builtin claude {modelarg} -n {name} --append-system-prompt-file {promptfile} {slashgoal}' \
     'lane:codex builtin {builtin-codex-lane}' \
     'lane:opencode builtin export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}' \
-    'lane:omp builtin omp {modelarg} --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
+    'lane:omp builtin HERDR_SPAWN_SESSION_NAME={name} omp {modelarg} --no-title -e {adapters}/omp/herdr-spawn.ts --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts'
 }
 
 lookup() { templates | awk -v a="$1" '!d && $1 == a { sub(/^[^ ]+ /, ""); print; d = 1 }'; }
@@ -299,7 +306,8 @@ expand() {
   done
   printf '%s' "$out$rest"
 }
-codex_start='' goal_id='' goal_target='' goal_surface=herdr parent_lane='' workdir=$tabdir
+startup_dir='' startup_kind=startup want_app='' goal_id='' goal_target='' goal_surface=herdr parent_lane='' workdir=$tabdir
+uuid_pattern='^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
 
 resolve_parent_lane() {
   local coordinator=$1 info root required ref manifest canonical
@@ -380,27 +388,220 @@ finish_spawn() {
   if [ -n "$goal_target" ]; then
     report_goal_startup failed || echo "spawn.sh: could not record goal startup failure on $goal_target" >&2
   fi
-  if [ -n "$codex_start" ]; then
-    rm -f -- "$codex_start/result" "$codex_start/result.tmp"
-    rmdir -- "$codex_start"
+  if [ -n "$startup_dir" ]; then
+    rm -f -- "$startup_dir/result" "$startup_dir/result.tmp" "$startup_dir/out"
+    rmdir -- "$startup_dir"
   fi
 }
 trap finish_spawn EXIT
 
-codex_ready() {
-  [ -n "$codex_start" ] || return 0
+create_startup_dir() {
+  startup_dir=$(
+    umask 077
+    mkdir -p "$statedir" && mktemp -d "$statedir/.startup.XXXXXXXX"
+  )
+}
+
+# Without a startup directory there is nothing to wait for. Only the Codex lane helper reports an error. A line that
+# finds a plain `codex` executable says so in its mark, and the app detected must then be codex.
+startup_ready() {
+  [ -n "$startup_dir" ] || return 0
   local phase detail
-  [ -s "$codex_start/result" ] || return 1
-  read -r phase detail <"$codex_start/result" || return 1
+  [ -s "$startup_dir/result" ] || return 1
+  read -r phase detail <"$startup_dir/result" || return 1
   case $phase in
-    ready) return 0 ;;
+    ready)
+      [ "$detail" != codex ] || want_app=codex
+      return 0
+      ;;
     error) die "Codex native goal startup failed in $1: $detail; left open, inspect with: $2" ;;
     *) return 1 ;;
   esac
 }
 
+# Sets launch to a child shell line that runs a naming step, which on success fills the shell arrays that the one
+# TUI command expands; left empty, that command is the plain launch. A single command keeps the typed line short
+# and never starts a second agent when the TUI exits nonzero. The step runs an agent process of its own, so the
+# line marks startup ready only as the TUI starts. A condition that reads the step's output sends it to the file
+# $herdr_spawn_o: a command substitution would also wait for any process the step leaves holding its stdout.
+named_launch() { # <prefix> <empty arrays> <condition> <filled arrays> <command> <plain> <warning> [<mark words>]
+  if ! create_startup_dir; then
+    echo "spawn.sh: could not create a startup directory; starting $name without a session name or color" >&2
+    launch=$1$6
+    return 0
+  fi
+  local mark output=
+  mark="printf '%s\n' ${8:-ready} > $(printf %q "$startup_dir/result")"
+  [[ $3 != *herdr_spawn_o* ]] || output="herdr_spawn_o=$(printf %q "$startup_dir/out"); "
+  launch="$1$output$2; if $3; then $4; else printf '%s\n' 'spawn.sh: $7' >&2; fi; $mark; $5"
+}
+
+# Cuts off a hung naming step, with perl on a host without `timeout`. Either one runs only an executable.
+# A call that ignores the first signal must still end before the startup wait does.
+naming_limit='timeout -k 5 20'
+command -v timeout >/dev/null || naming_limit="perl -e 'alarm shift; exec @ARGV' 20"
+
+claude_colors=(red blue green yellow purple orange pink cyan)
+
+known_color() { # <value>
+  local color
+  for color in "${claude_colors[@]}"; do [ "$color" != "$1" ] || return 0; done
+  return 1
+}
+
+# The session ID of a Claude Code caller, lowercased; fails for any other caller.
+coordinator_id() {
+  local id
+  id=$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-}" | LC_ALL=C tr 'A-F' 'a-f')
+  [[ $id =~ $uuid_pattern ]] && printf '%s' "$id"
+}
+
+# The prompt-bar color of a Claude Code coordinator, from its own transcript; prints nothing when unknown.
+coordinator_color() {
+  local id
+  id=$(coordinator_id) || return 0
+  local files=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$id.jsonl")
+  [ "${#files[@]}" -eq 1 ] && [ -f "${files[0]}" ] && [ -r "${files[0]}" ] || return 0
+  jq -nRr --arg id "$id" '
+    reduce (inputs | select(contains("\"agent-color\"")) | fromjson? | objects
+      | select(.type == "agent-color" and .sessionId == $id)) as $row (""; $row.agentColor)
+  ' "${files[0]}" 2>/dev/null || true
+}
+
+# The color asked for this coordinator, which its transcript does not record until it is applied.
+requested_color() {
+  local id
+  id=$(coordinator_id) || return 0
+  jq -r --arg id "$id" 'objects | select(.sessionId == $id) | .color | strings' "$statedir/identity/$id.json" \
+    2>/dev/null || true
+}
+
+write_identity() { # <session-id> <file>
+  local repo color
+  # A linked worktree's common directory is the main repository's. Outside git, the working directory names it.
+  if ! repo=$(git rev-parse --path-format=absolute --git-common-dir) || [[ $repo != /* ]]; then repo=$PWD; fi
+  repo=${repo%/.git}
+  repo=$(printf '%s' "${repo##*/}" | LC_ALL=C tr -cd 'A-Za-z0-9._-')
+  repo=${repo#"${repo%%[!.-]*}"}
+  color=$(coordinator_color)
+  known_color "$color" || color=${claude_colors[RANDOM % ${#claude_colors[@]}]}
+  (
+    umask 077
+    mkdir -p "${2%/*}" || exit
+    staged=$(mktemp "$2.XXXXXXXX") || exit
+    # Never over an existing request: another spawn of this session may have written it meanwhile.
+    jq -n --arg sessionId "$1" --arg name "coord-${repo:-session}" --arg color "$color" \
+      '{$sessionId, $name, $color, done: false}' >"$staged" && mv -n -- "$staged" "$2"
+    rm -f -- "$staged"
+  )
+}
+
+# A lane makes a Claude Code caller its coordinator, and only that session can set its own name and color: leave
+# one request per session for the plugin's mod (hooks/coordinator-identity.mjs), and say so until it is done.
+request_identity() {
+  local id file request name color
+  id=$(coordinator_id) || return 0
+  file=$statedir/identity/$id.json
+  [ -e "$file" ] || write_identity "$id" "$file" 2>/dev/null
+  request=$(jq -ser --arg id "$id" '
+    select(length == 1) | .[0] | select(.sessionId == $id)
+    | if .done == true then "done"
+      else "\(.name | strings | select(test("\\Acoord-[A-Za-z0-9._-]+\\z"))) \(.color | strings)" end
+  ' "$file" 2>/dev/null) || request=
+  [ "$request" != 'done' ] || return 0
+  name=${request%% *} color=${request#* }
+  if ! known_color "$color"; then
+    echo "spawn.sh: warning: no usable coordinator name and color request at $file. Tell the user now, once:" \
+      "they can type /rename and /color to set this session's name and color" >&2
+    return 0
+  fi
+  # A coordinator that spawns once gets no later turn from this script, so the user hears of it now.
+  echo "spawn.sh: coordinator name $name and color $color requested for this session, not applied yet. Tell the user" \
+    "now, once: if this session's name and color have not changed when this turn ends, they can type /rename $name" \
+    "and /color $color, whichever it lacks" >&2
+}
+
+# A template that runs a subcommand (a bare word after `claude`), selects a session itself or where it runs, or
+# prints and exits, is launched as it is.
+claude_uncolorable='^claude[[:space:]]+[[:alpha:]]|[[:space:]](-r|--resume|-c|--continue|--session-id|--fork-session|-p|--print|--bg|--background|--cloud|--teleport|--from-pr|-w|--worktree|--no-session-persistence|--environment|--desktop)([[:space:]=]|$)'
+
+# A `claude ...` template: create the session and set its color in a print-mode call, then resume it in the TUI.
+color_claude() {
+  [[ $template == 'claude '* && ! $template =~ $claude_uncolorable ]] || return 0
+  local uuid current color choice command call condition
+  local -a choices=()
+  uuid=$(uuidgen 2>/dev/null) || uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || uuid=
+  uuid=$(printf '%s' "$uuid" | LC_ALL=C tr 'A-F' 'a-f')
+  if [[ ! $uuid =~ $uuid_pattern ]]; then
+    echo "spawn.sh: no UUID from uuidgen or /proc; starting $name without a Claude session color" >&2
+    return 0
+  fi
+  current=$(coordinator_color)
+  [ -n "$current" ] || current=$(requested_color)
+  for choice in "${claude_colors[@]}"; do
+    [ "$choice" = "$current" ] || choices+=("$choice")
+  done
+  color=${choices[RANDOM % ${#choices[@]}]}
+  command=$(expand "claude \"\${herdr_spawn_a[@]}\" ${template#claude }") || die "could not prepare the $key launch"
+  # The user settings only: this call must not load the settings of a repository nobody has trusted yet.
+  call="$naming_limit claude -p --safe-mode --setting-sources user -n $name --session-id $uuid '/color $color'"
+  # A function or alias cannot be time-limited, so a wrapped `claude` starts without a color.
+  condition="[[ \$(command -v claude) = /* ]] && $call </dev/null >\"\$herdr_spawn_o\" 2>/dev/null"
+  condition+=" && [ \"\$(<\"\$herdr_spawn_o\")\" = 'Session color set to: $color' ]"
+  # The call also succeeds where it saves no transcript, and then there is no session to resume. find, since an
+  # unmatched glob aborts a zsh line; through command, since an interactive shell may alias it to another tool.
+  condition+=" && [ -n \"\$(command find \"\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/projects/\" -mindepth 2 -maxdepth 2"
+  condition+=" -name $uuid.jsonl 2>/dev/null)\" ]"
+  named_launch '' 'herdr_spawn_a=()' "$condition" "herdr_spawn_a=(--resume $uuid)" "$command" "$launch" \
+    'could not set the Claude session color; starting without it'
+}
+
+# Built-in ordinary Codex: save a named thread through the app-server, then resume it with the prompt. Only a plain
+# executable qualifies: a wrapper function or alias may use another CODEX_HOME, which lacks that thread.
+name_codex() {
+  local plain command condition
+  plain=$(expand "$template") || die "could not prepare the $key launch"
+  # shellcheck disable=SC2016 # The child shell holds the arrays.
+  command=$(expand 'codex "${herdr_spawn_before[@]}" {modelarg} "${herdr_spawn_after[@]}" {prompt}') ||
+    die "could not prepare the $key launch"
+  condition="[[ \$(command -v codex) = /* ]] && herdr_spawn_app=codex"
+  condition+=" && herdr_spawn_id=\$(node $(printf %q "$scriptdir/codex-lane.mjs") --name-only $name"
+  [ -z "$model" ] || condition+=" $(printf %q "$model")"
+  condition+=")"
+  # shellcheck disable=SC2016 # The child shell holds the thread ID and the app.
+  named_launch '' 'herdr_spawn_before=(); herdr_spawn_after=(); herdr_spawn_app=' "$condition" \
+    'herdr_spawn_before=(resume); herdr_spawn_after=(-- "$herdr_spawn_id")' "$command" "$plain" \
+    'could not name the Codex session; starting without a name' '"ready $herdr_spawn_app"'
+}
+
+# Built-in OpenCode: create a titled session through the API, then open the TUI on it. The session names the child's
+# directory, or the background service would give it its own. The API call runs the executable, not the shell's
+# `opencode`: flags a wrapper adds for the TUI are rejected before `api`.
+name_opencode() {
+  local args=${template##*'opencode '} standalone='' prefix plain command match filter condition
+  prefix=${template%"opencode $args"}
+  case $args in '--standalone '*) standalone=' --standalone' args=${args#--standalone } ;; esac
+  prefix=$(expand "$prefix") || die "could not prepare the $key launch"
+  plain=$(expand "opencode$standalone $args") || die "could not prepare the $key launch"
+  command=$(expand "opencode$standalone \"\${herdr_spawn_a[@]}\" $args") || die "could not prepare the $key launch"
+  match="--arg title $name --arg directory \"\$herdr_spawn_dir\""
+  # shellcheck disable=SC2016 # jq variables, not shell variables.
+  filter='select(length == 1) | .[0].data | select(.title == $title and .location.directory == $directory)'
+  # shellcheck disable=SC2016
+  filter+=' | .id | strings | select(test("\\Ases_[A-Za-z0-9]+\\z"))'
+  condition="herdr_spawn_dir=\$(pwd -P) && $naming_limit opencode api$standalone session.create"
+  condition+=" --data \"\$(jq -cn $match '{\$title, location: {\$directory}}')\""
+  condition+=" </dev/null >\"\$herdr_spawn_o\" 2>/dev/null"
+  condition+=" && herdr_spawn_id=\$(jq -esr $match $(printf %q "$filter") <\"\$herdr_spawn_o\" 2>/dev/null)"
+  # shellcheck disable=SC2016 # The child shell holds the session ID.
+  named_launch "$prefix" 'herdr_spawn_a=()' "$condition" 'herdr_spawn_a=(--session "$herdr_spawn_id")' "$command" "$plain" \
+    'could not create a named OpenCode session; starting with the default title'
+}
+
 prepare_launch() {
   if [ -n "$lane" ]; then
+    # Before the child's color is chosen, so that it avoids this one. Nothing in it may fail the spawn.
+    request_identity || true
     create_goal_manifest
     # The same private, unique directory holds the brief and any generated config.
     promptfile=$goal_dir/brief.md
@@ -418,18 +619,43 @@ prepare_launch() {
   fi
   if [ "$key" = lane:codex ] && [ "$origin" = builtin ]; then
     local result
-    codex_start=$(mktemp -d "$statedir/.codex-start.XXXXXXXX") || die "could not create Codex startup directory"
-    launch=$(printf 'node %q %q %q %q' "$scriptdir/codex-lane.mjs" "$codex_start" "$promptfile" "$goal")
+    create_startup_dir || die "could not create Codex startup directory"
+    startup_kind='Codex native goal startup' want_app=codex
+    launch=$(printf 'node %q %q %q %q %q' "$scriptdir/codex-lane.mjs" "$startup_dir" "$promptfile" "$goal" "$name")
     if [ -n "$model" ]; then launch+=" $(printf %q "$model")"; fi
-    result=$(printf %q "$codex_start/result")
-    launch+=" || { if [ -d $(printf %q "$codex_start") ] && [ ! -s $result ]; then printf '%s\n' 'error Codex lane helper failed (Node.js 18+ is required in the child shell)' > $result; fi; }"
+    result=$(printf %q "$startup_dir/result")
+    launch+=" || { if [ -d $(printf %q "$startup_dir") ] && [ ! -s $result ]; then printf '%s\n' 'error Codex lane helper failed (Node.js 18+ is required in the child shell)' > $result; fi; }"
   else
-    launch=$(expand "$template") || die "could not prepare the $key launch"
+    case "$origin:$agent" in
+      builtin:codex) name_codex ;;
+      builtin:opencode) name_opencode ;;
+      *)
+        launch=$(expand "$template") || die "could not prepare the $key launch"
+        color_claude ;;
+    esac
     if [ -n "$oc_inline" ]; then
       # shellcheck disable=SC2016 # Merge only after entering the child shell.
       launch='( set +x; if OPENCODE_CONFIG_CONTENT=$('"$oc_inline"'); then export OPENCODE_CONFIG_CONTENT; '"$launch"'; else printf "%s\n" "spawn.sh: invalid child OPENCODE_CONFIG_CONTENT; OpenCode not started" >&2; exit 1; fi )'
     fi
   fi
+}
+
+# Sets status to "<app> <state>" once the child runs in terminal $1, and inspect to the command that reads it.
+wait_for_hc_agent() {
+  local term=$1
+  inspect="hc read $term --lines 40"
+  status=
+  for _ in $(seq 120); do
+    if startup_ready "terminal $term" "$inspect"; then
+      status=$(hc get "$term" --json | jq -r --arg want "$want_app" \
+        'select(.status.app and ($want == "" or (.status.app | ascii_downcase) == $want)) | "\(.status.app) \(.status.state)"') || true
+      if [ -n "$status" ] && startup_ready "terminal $term" "$inspect"; then break; fi
+    fi
+    sleep 0.5
+  done
+  startup_ready "terminal $term" "$inspect" ||
+    die "no $startup_kind confirmation in terminal $term after 60s, left open; inspect with: $inspect"
+  [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: $inspect"
 }
 
 # The Herdr app (herdr-core, `hc`) sets HC_TERMINAL_ID instead of HERDR_ENV. The child launches through hc run
@@ -485,19 +711,7 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
       goal_target=$term
     fi
 
-    inspect="hc read $term --lines 40"
-    status=
-    for _ in $(seq 120); do
-      if codex_ready "terminal $term" "$inspect"; then
-        status=$(hc get "$term" --json | jq -r --arg native "$codex_start" \
-          'select(.status.app and ($native == "" or (.status.app | ascii_downcase) == "codex")) | "\(.status.app) \(.status.state)"') || true
-        if [ -n "$status" ] && codex_ready "terminal $term" "$inspect"; then break; fi
-      fi
-      sleep 0.5
-    done
-    codex_ready "terminal $term" "$inspect" ||
-      die "no Codex native goal startup confirmation in terminal $term after 60s, left open; inspect with: $inspect"
-    [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: $inspect"
+    wait_for_hc_agent "$term"
     if [ -n "$goal_target" ]; then
       # An agent waiting on a dialog has not taken its goal; only the user can answer it.
       startup=ready
@@ -526,20 +740,18 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   target=$4 dir=$5
   shell=${SHELL:-/bin/sh}
   prepare_launch
-  line="cd $(printf %q "$PWD") && $launch; exec $(printf %q "$shell")"
+  # Grouped, so none of the launch runs after a failed cd. A template may end in a comment or a separator, which
+  # only a newline closes.
+  line="cd $(printf %q "$PWD") && {
+$launch
+}; exec $(printf %q "$shell")"
   split=$(herdr-app 'do' pane.split --pane "$target" --direction "$dir" \
     --argv "$(jq -cn --arg sh "$shell" --arg line "$line" '[$sh, "-ic", $line]')") ||
     die "split of $target failed: $split"
   term=$(jq -r '.terminal // empty' <<<"$split")
   [ -n "$term" ] || die "split of $target returned no terminal: $split"
 
-  status=
-  for _ in $(seq 120); do
-    status=$(hc get "$term" --json | jq -r 'select(.status.app) | "\(.status.app) \(.status.state)"') || true
-    [ -n "$status" ] && break
-    sleep 0.5
-  done
-  [ -n "$status" ] || die "no agent detected in terminal $term after 60s, left open; inspect with: hc read $term --lines 40"
+  wait_for_hc_agent "$term"
   echo "$term $name $status"
   exit 0
 fi
@@ -584,16 +796,15 @@ herdr pane run "$pane" "$launch" >/dev/null || die "launch failed; pane $pane le
 inspect="herdr pane read $pane --source recent --lines 40"
 info=
 for _ in $(seq 120); do
-  if codex_ready "pane $pane" "$inspect" && info=$(herdr agent get "$pane" 2>/dev/null); then
-    if [ -z "$codex_start" ] || {
-      jq -e '.result.agent.agent == "codex"' <<<"$info" >/dev/null && codex_ready "pane $pane" "$inspect"
-    }; then break; fi
+  if startup_ready "pane $pane" "$inspect" && info=$(herdr agent get "$pane" 2>/dev/null); then
+    if { [ -z "$want_app" ] || jq -e --arg want "$want_app" '.result.agent.agent == $want' <<<"$info" >/dev/null; } &&
+      startup_ready "pane $pane" "$inspect"; then break; fi
   fi
   info=
   sleep 0.5
 done
-codex_ready "pane $pane" "$inspect" ||
-  die "no Codex native goal startup confirmation in pane $pane after 60s, pane left open; inspect with: $inspect"
+startup_ready "pane $pane" "$inspect" ||
+  die "no $startup_kind confirmation in pane $pane after 60s, pane left open; inspect with: $inspect"
 [ -n "$info" ] || die "no agent detected in pane $pane after 60s, pane left open; inspect with: $inspect"
 
 herdr agent rename "$pane" "$name" >/dev/null ||

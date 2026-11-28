@@ -19,7 +19,7 @@ Open every pane and tab through `spawn.sh`, which picks the surface and your spa
 
 ## Agents
 
-`scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them.
+`scripts/spawn.sh` knows `claude`, `codex`, `opencode` and `omp`. Default agent: the one the user names, otherwise your own kind. It types the launch line into the pane's interactive shell, so wrappers, aliases and shell functions apply; `herdr agent start` runs the bare executable and bypasses them. Built-in launches also give the child `<name>` as its native session name, and Claude children a prompt-bar color; if that fails the child starts anyway with a warning in its pane (README).
 
 Launch templates live in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (override the path with `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`, `#` for comments; `{name}` is the child name and `{prompt}` the prompt file. An entry overrides a default or adds an agent; lanes use the key `lane:<agent>`. Besides `{name}` and `{prompt}`, templates take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted. Example:
 
@@ -90,6 +90,8 @@ In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `la
 ### Coordinating lanes
 
 Spawning lanes makes you their coordinator. Your goal is every lane you spawned at `done`, its result verified and integrated; the lanes do the work and you keep them unblocked.
+
+A Claude Code coordinator's first lane also requests a session name (`coord-<repo>`) and a color, which the plugin's mod sets once your turn ends, only where you have none (Claude Code 2.1.326 or newer, with mods on). While the request is unapplied, `spawn.sh` prints both values on stderr. You cannot tell from inside whether the mod will run, so in your reply tell the user, once, that if your session's name and color have not changed when the turn ends they can type `/rename coord-<repo>` and `/color <color>`, whichever it lacks.
 
 - Before starting panes, split the request into independently verifiable deliverables. Give each deliverable one root lane and put its bounded subtasks in that lane's tab. For each pane, record its scope, dependencies, done criterion, and `--task` class.
 - Tell a root driver which subtasks you will launch, what it owns directly, and which results it must wait for before declaring the whole lane done. Subtask reports come to you; verify and relay the results the driver needs.

@@ -11,7 +11,10 @@ An Opus coordinator in the Herdr app runs two tickets as driver lanes, each in i
 - Herdr 0.9.1 or newer, with the caller running inside a Herdr pane; or the Herdr app, with `hc` (herdr-core) on the caller's `PATH`. To split an explicit pane by ID in the app (without `--lane`), run the command on the window's host with `herdr-app` on `PATH`. The same `herdr-app` lets `--tab` name the new app tab after the child; without it the tab keeps its number.
 - `jq`
 - A bash- or zsh-compatible shell in the pane (the launch line uses `$(cat …)`)
-- For built-in Codex lanes only: Codex CLI 0.171.0 (native goal startup verified on this version) and Node.js 18+ on the child shell's `PATH`
+- For built-in Codex lanes: Codex CLI 0.171.0 (native goal startup verified on this version) and Node.js 18+ on the child shell's `PATH`. Ordinary Codex launches use the same Node.js to name the session and start unnamed without it
+- Optional, for a Claude child's color: `uuidgen` or `/proc/sys/kernel/random/uuid` on the caller's host
+- Optional, for a Claude child's color and a titled OpenCode session: `claude` or `opencode` as an executable on the child shell's `PATH`, and `timeout`, or `perl` when the caller's host has no `timeout`
+- Optional, for a Claude coordinator's own name and color: Claude Code 2.1.326 or newer with mods on, and this plugin installed at 3.2.0 or newer
 - Recommended: the built-in Herdr skill, which covers prompting, waiting, reading and dialogs: `npx skills add herdrdev/herdr --skill herdr -g`
 
 ## Install
@@ -48,6 +51,35 @@ Ask in natural language:
 - "Hand this investigation to a new claude session." (writes a handoff doc first)
 - "Start three parallel workers, one per package." (writes a lanes doc first)
 - "Run these two tickets as driver lanes." (one tab and worktree per ticket; visible subtasks share their ticket's tab)
+
+## Session names and colors
+
+Besides the Herdr name, a child gets `<name>` as its harness's own session name, for ordinary launches and lanes. A failure to name or color never fails the spawn: when herdr-spawn detects it, it warns, and the child starts with its plain launch (a built-in Codex lane continues unnamed instead). The warning is one line; other messages can appear beside it, such as those of the Codex helper and app-server.
+
+| Agent | How it is named | If that fails |
+|---|---|---|
+| Claude Code | `-n {name}`; a color also needs the print-mode step below | Starts without a color |
+| Codex | The thread's name, saved through the app-server before the TUI resumes that thread. Ordinary launches do this only when the shell's `codex` is a plain executable, because an alias or function may use another `CODEX_HOME`. An ordinary launch starts that thread read-only, so naming never trusts the folder, and the resumed TUI handles trust and your sandbox as usual | An ordinary launch starts unnamed; a lane keeps its goal checks and continues unnamed, waiting at most 5 seconds for the name and, after a failed naming, at most 5 more for the app-server to exit |
+| OpenCode | A titled session created with `opencode api session.create` (`--standalone` when the TUI uses it) in the child's physical working directory, opened with `--session` when the response has that title and directory. The API call runs the executable, so a shell wrapper's flags apply to the TUI only. A wrapper that switches OpenCode's data directory therefore gets an untitled new session, with no warning | Starts with the default title |
+| oh-my-pi | The bundled `adapters/omp/herdr-spawn.ts` extension. Ordinary launches also turn auto-resume off for that launch, so an earlier session is not reopened | Starts unnamed |
+
+Only Claude children get a prompt-bar color; herdr-spawn sets none for Codex, OpenCode or oh-my-pi. `spawn.sh` creates a session ID, sets `/color` on it with `claude -p --safe-mode --setting-sources user` in the child shell, and the TUI resumes that session with `--resume`. This needs the shell's `claude` to be a plain executable: a function or alias cannot be time-limited, so it starts without a color. A session whose transcript is not saved (as with `CLAUDE_CODE_SKIP_PROMPT_HISTORY=1`) starts without a color too, since there is nothing to resume: the child shell looks for it under `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/` first. The color is random and differs from the coordinator's when that is known: the coordinator is Claude Code (`CLAUDE_CODE_SESSION_ID`) and its transcript records one or, failing that, a coordinator request (below) holds one.
+
+A colored Claude child (including a custom `claude ` template that gets a color) and a named Codex child open their session by resuming it, so `SessionStart` hooks that match only `startup` do not run in them, and hooks that match `resume` do. Context a `startup` hook would add is therefore missing from the child's first request. A colored Claude child's history also begins with the `/color` command and its output. A Claude or ordinary Codex child that starts with its plain launch is a new session. A built-in Codex lane is different: it resumes its saved thread whether or not it was named.
+
+The color call and the OpenCode API call are cut off after 20 seconds by `timeout`, which kills a call still running 5 seconds later, or by a `perl` alarm when the caller's host has no `timeout`; where the chosen one cannot run, the child starts with its plain launch. Each call writes to a file in the private startup directory, so a process it leaves running does not keep the launch waiting. The `perl` alarm signals only the process it started: a launcher's hung child can be left running, and a process that ignores the signal is not cut off.
+
+A custom template of any agent gets a color too when it starts with `claude `, the next word does not start with a letter (as in the subcommands `claude agents` or `claude mcp`) and none of its words is `-r`, `--resume`, `-c`, `--continue`, `--session-id`, `--fork-session`, `-p`, `--print`, `--bg`, `--background`, `--cloud`, `--teleport`, `--from-pr`, `-w`, `--worktree`, `--no-session-persistence`, `--environment` or `--desktop` (also as `--flag=value`). Other custom templates run as written, and naming is up to them.
+
+### The coordinator
+
+A Claude Code session that spawns a lane gets a name and a color too; coordinators on other harnesses get neither. Its first lane (`--lane` or `--subtask-of`) requests the name `coord-<repo>`, after the main repository of the caller's directory (the directory's own name outside git), and a color: the one its transcript records if `/color` takes it, otherwise a random one. Lane children avoid the coordinator's color as described above. Ordinary spawns request nothing.
+
+Only the session itself can apply these, so the plugin's mod (`hooks/coordinator-identity.mjs`) does it once the session is idle, running `/rename` and `/color` only for what the session does not have yet; a title Claude Code generates on its own does not count as a name. A request made during a turn is applied after the turn ends (after an interrupted turn, Esc, it was observed still pending), and an unsent draft is left alone.
+
+This needs Claude Code 2.1.326 or newer with mods on and this plugin installed at 3.2.0 or newer; the plain skill folder has no mod. Claude Code 2.1.200 was tested to ignore the mod and still load the plugin's hooks. On 2.1.332, installing or updating the plugin (`claude plugin install` or `update`, and the `/plugin` screen) asked for no approval specific to the mod, only the generic plugin trust warning. A session that is already running gets the mod after the plugin is updated and the session reloads its plugins or restarts.
+
+The request is `herdr-spawn/identity/<session-id>.json` in the state directory (`${XDG_STATE_HOME:-~/.local/state}`), a private file that `spawn.sh` writes once per session and the mod marks `done`. Until then each lane spawn prints the requested name and color on stderr. The coordinator cannot tell from inside whether the mod will run, so it tells you once: if the session's name and color have not changed when the turn ends, you can type `/rename <name>` and `/color <color>`, whichever it lacks. A request that cannot be written or read warns in one line, which has the coordinator tell you that you can type `/rename` and `/color` to set the session's name and color, and never fails the spawn.
 
 ## Lanes
 
@@ -130,19 +162,19 @@ A Claude Code caller with a `claude` child talks to it through SendMessage in bo
 
 | Agent | Template |
 |---|---|
-| `claude` | `claude -n {name} {prompt}` |
-| `codex` | `codex {prompt}` |
-| `opencode` | `opencode --prompt {prompt}` |
-| `omp` | `omp {prompt}` |
+| `claude` | `claude -n {name} {prompt}`, with `--resume <id>` of the colored session |
+| `codex` | `codex {prompt}`, or `codex resume` of the named thread with `{prompt}` |
+| `opencode` | `opencode --prompt {prompt}`, with `--session <id>` of the titled session |
+| `omp` | `HERDR_SPAWN_SESSION_NAME={name} omp --no-title -e {adapters}/omp/herdr-spawn.ts --config {adapters}/omp/herdr-spawn.yml {prompt}` |
 
 For root lanes and subtasks, the `lane:<agent>` template is used instead:
 
 | Lane agent | Template |
 |---|---|
-| `lane:claude` | `claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}` |
+| `lane:claude` | `claude -n {name} --append-system-prompt-file {promptfile} {slashgoal}`, with `--resume <id>` of the colored session |
 | `lane:codex` | Built-in native goal adapter; resumes the saved thread with `--no-daemon` and `shell_environment_policy.inherit=all` so commands run with the child's `HERDR_*` or `HC_*` variables and `LANE_*` variables |
-| `lane:opencode` | `export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}` |
-| `lane:omp` | `omp --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts` |
+| `lane:opencode` | `export OPENCODE_CONFIG={occonfig}; opencode --standalone --prompt {prompt}`, with `--session <id>` of the titled session |
+| `lane:omp` | `HERDR_SPAWN_SESSION_NAME={name} omp --no-title -e {adapters}/omp/herdr-spawn.ts --goal {goal} --append-system-prompt {promptfile} -e {adapters}/omp/herdr-lanes.ts` |
 
 Override a default or add an agent in `${XDG_CONFIG_HOME:-~/.config}/herdr-spawn/agents.conf` (or the file named by `HERDR_SPAWN_CONFIG`). One entry per line, `<agent> <template>`; blank lines and full-line `#` comments are ignored. `{name}` becomes the child's name and `{prompt}` becomes `"$(cat <prompt-file>)"`. Lane entries use the key `lane:<agent>` and also take `{promptfile}` (its absolute path), `{goal}`, `{slashgoal}` (`/goal <goal> (brief: <promptfile>)`), `{adapters}` (the repo's `adapters/` directory) and `{occonfig}` (an OpenCode config file that loads the lane plugin, written only when the template uses it); each is shell-quoted.
 
@@ -155,7 +187,7 @@ codex   my-codex-alias {prompt}
 gemini  gemini -i {prompt}
 ```
 
-The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead). In the Herdr app the new pane runs it with `$SHELL -ic`, for the same reason. The built-in Codex lane adapter uses the `codex` executable on that shell's `PATH` for both steps. To use a shell alias, function, or custom launch flow instead, set a `lane:codex` entry; that fully replaces the adapter and is responsible for native goal setup. Codex treats a positional `/goal …` argument as ordinary text.
+The line is typed into the pane's interactive shell with `herdr pane run`, which is why wrappers, aliases and functions apply (`herdr agent start` runs the bare executable instead). In the Herdr app the new pane runs it with `$SHELL -ic`, for the same reason. The built-in Codex lane adapter uses the `codex` executable on that shell's `PATH` for both steps. To use a shell alias, function, or custom launch flow instead, set a `lane:codex` entry; that fully replaces the adapter and is responsible for naming and native goal setup. An ordinary launch through an alias or function needs no entry: it starts as `codex {prompt}`, unnamed. Codex treats a positional `/goal …` argument as ordinary text.
 
 ### Model routing
 
@@ -184,7 +216,7 @@ Custom templates receive a shell-quoted `{model}` value or an optional `{modelar
 
 ## Testing lanes
 
-Run `node --test tests/*.test.mjs` and `bash tests/spawn-hc.sh` for startup, placement, model routing, and goal lifecycle checks. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real TUI against a loopback model endpoint and verify that disabling goals prevents startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
+Run `node --test tests/*.test.mjs` and `bash tests/spawn-hc.sh` for startup, placement, model routing, session naming, coordinator identity, and goal lifecycle checks; they use fake agent CLIs, a fake mod host for the coordinator mod and a fake `pi` for the oh-my-pi naming extension, whose tests are skipped where Node cannot import TypeScript. `spawn-hc.sh` needs `perl` and also runs launch lines under zsh when it is installed. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real app-server and TUI against a loopback model endpoint and verify that disabling goals prevents lane startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
 
 ## License
 
