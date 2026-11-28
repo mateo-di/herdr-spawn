@@ -106,8 +106,8 @@ if (command === 'resume') {
         return;
       }
       // A stuck server outlives the end of its input.
-      if (process.env.FAKE === 'name-stuck') setInterval(() => {}, 1000);
-      if (['name-hang', 'name-stuck'].includes(process.env.FAKE)) return;
+      if (['name-stuck', 'late-goal-name-stuck'].includes(process.env.FAKE)) setInterval(() => {}, 1000);
+      if (['name-hang', 'name-stuck', 'late-goal-name-stuck'].includes(process.env.FAKE)) return;
       named = params.name;
       // A lane's rollout comes from its goal.
       if (nameOnly && process.env.FAKE !== 'not-saved') writeFileSync(rollout, '');
@@ -134,7 +134,9 @@ if (command === 'resume') {
       reply({ goal: stored });
     } else if (method === 'thread/goal/get') {
       assert.deepEqual(params, { threadId: id });
-      reply({ goal: process.env.FAKE === 'mismatch' ? { ...stored, objective: 'wrong' } : stored });
+      // Late enough that naming alone would overrun the startup deadline.
+      setTimeout(() => reply({ goal: process.env.FAKE === 'mismatch' ? { ...stored, objective: 'wrong' } : stored }),
+        process.env.FAKE === 'late-goal-name-stuck' ? 22_000 : 0);
     } else assert.fail(method);
   });
 }
@@ -197,11 +199,12 @@ for (const [scenario, message] of [
   ['name-stuck', /naming timed out/],
   ['name-error-exit', /name could not be set/],
   ['name-held', /name could not be set/],
+  ['late-goal-name-stuck', /naming timed out/],
 ]) {
   test(`a lane warns and still pursues its goal when naming fails: ${scenario}`, async t => {
     const { root, startup, exit, warnings } = await withFake(t, scenario);
-    // Longer than the helper's limits on naming and then on the server's exit, within its startup limit.
-    assert.equal(await waitForFile(join(root, 'resumed'), 20_000), id);
+    // Longer than a late goal followed by the helper's limits on naming and then on the server's exit.
+    assert.equal(await waitForFile(join(root, 'resumed'), 40_000), id);
     await writeFile(join(root, 'finish'), '');
     assert.equal(await waitForFile(join(startup, 'result')), `ready ${id}`);
     assert.match(warnings(), /could not name thread .*, continuing: /);

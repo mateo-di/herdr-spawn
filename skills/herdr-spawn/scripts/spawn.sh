@@ -389,7 +389,7 @@ finish_spawn() {
     report_goal_startup failed || echo "spawn.sh: could not record goal startup failure on $goal_target" >&2
   fi
   if [ -n "$startup_dir" ]; then
-    rm -f -- "$startup_dir/result" "$startup_dir/result.tmp"
+    rm -f -- "$startup_dir/result" "$startup_dir/result.tmp" "$startup_dir/out"
     rmdir -- "$startup_dir"
   fi
 }
@@ -422,16 +422,18 @@ startup_ready() {
 # Sets launch to a child shell line that runs a naming step, which on success fills the shell arrays that the one
 # TUI command expands; left empty, that command is the plain launch. A single command keeps the typed line short
 # and never starts a second agent when the TUI exits nonzero. The step runs an agent process of its own, so the
-# line marks startup ready only as the TUI starts.
+# line marks startup ready only as the TUI starts. A condition that reads the step's output sends it to the file
+# $herdr_spawn_o: a command substitution would also wait for any process the step leaves holding its stdout.
 named_launch() { # <prefix> <empty arrays> <condition> <filled arrays> <command> <plain> <warning> [<mark words>]
   if ! create_startup_dir; then
     echo "spawn.sh: could not create a startup directory; starting $name without a session name or color" >&2
     launch=$1$6
     return 0
   fi
-  local mark
+  local mark output=
   mark="printf '%s\n' ${8:-ready} > $(printf %q "$startup_dir/result")"
-  launch="$1$2; if $3; then $4; else printf '%s\n' 'spawn.sh: $7' >&2; fi; $mark; $5"
+  [[ $3 != *herdr_spawn_o* ]] || output="herdr_spawn_o=$(printf %q "$startup_dir/out"); "
+  launch="$1$output$2; if $3; then $4; else printf '%s\n' 'spawn.sh: $7' >&2; fi; $mark; $5"
 }
 
 # Cuts off a hung naming step, with perl on a host without `timeout`. Either one runs only an executable.
@@ -544,8 +546,8 @@ color_claude() {
   # The user settings only: this call must not load the settings of a repository nobody has trusted yet.
   call="$naming_limit claude -p --safe-mode --setting-sources user -n $name --session-id $uuid '/color $color'"
   # A function or alias cannot be time-limited, so a wrapped `claude` starts without a color.
-  condition="[[ \$(command -v claude) = /* ]] && herdr_spawn_response=\$($call </dev/null 2>/dev/null)"
-  condition+=" && [ \"\$herdr_spawn_response\" = 'Session color set to: $color' ]"
+  condition="[[ \$(command -v claude) = /* ]] && $call </dev/null >\"\$herdr_spawn_o\" 2>/dev/null"
+  condition+=" && [ \"\$(<\"\$herdr_spawn_o\")\" = 'Session color set to: $color' ]"
   # The call also succeeds where it saves no transcript, and then there is no session to resume. find, since an
   # unmatched glob aborts a zsh line; through command, since an interactive shell may alias it to another tool.
   condition+=" && [ -n \"\$(command find \"\${CLAUDE_CONFIG_DIR:-\$HOME/.claude}/projects/\" -mindepth 2 -maxdepth 2"
@@ -587,9 +589,10 @@ name_opencode() {
   filter='select(length == 1) | .[0].data | select(.title == $title and .location.directory == $directory)'
   # shellcheck disable=SC2016
   filter+=' | .id | strings | select(test("\\Ases_[A-Za-z0-9]+\\z"))'
-  condition="herdr_spawn_dir=\$(pwd -P) && herdr_spawn_response=\$($naming_limit opencode api$standalone session.create"
-  condition+=" --data \"\$(jq -cn $match '{\$title, location: {\$directory}}')\" </dev/null 2>/dev/null)"
-  condition+=" && herdr_spawn_id=\$(printf '%s' \"\$herdr_spawn_response\" | jq -esr $match $(printf %q "$filter") 2>/dev/null)"
+  condition="herdr_spawn_dir=\$(pwd -P) && $naming_limit opencode api$standalone session.create"
+  condition+=" --data \"\$(jq -cn $match '{\$title, location: {\$directory}}')\""
+  condition+=" </dev/null >\"\$herdr_spawn_o\" 2>/dev/null"
+  condition+=" && herdr_spawn_id=\$(jq -esr $match $(printf %q "$filter") <\"\$herdr_spawn_o\" 2>/dev/null)"
   # shellcheck disable=SC2016 # The child shell holds the session ID.
   named_launch "$prefix" 'herdr_spawn_a=()' "$condition" 'herdr_spawn_a=(--session "$herdr_spawn_id")' "$command" "$plain" \
     'could not create a named OpenCode session; starting with the default title'
@@ -737,7 +740,11 @@ if [ "${HERDR_ENV:-}" != 1 ] && [ -n "${HC_TERMINAL_ID:-}" ]; then
   target=$4 dir=$5
   shell=${SHELL:-/bin/sh}
   prepare_launch
-  line="cd $(printf %q "$PWD") && $launch; exec $(printf %q "$shell")"
+  # Grouped, so none of the launch runs after a failed cd. A template may end in a comment or a separator, which
+  # only a newline closes.
+  line="cd $(printf %q "$PWD") && {
+$launch
+}; exec $(printf %q "$shell")"
   split=$(herdr-app 'do' pane.split --pane "$target" --direction "$dir" \
     --argv "$(jq -cn --arg sh "$shell" --arg line "$line" '[$sh, "-ic", $line]')") ||
     die "split of $target failed: $split"

@@ -54,7 +54,7 @@ Ask in natural language:
 
 ## Session names and colors
 
-Besides the Herdr name, a child gets `<name>` as its harness's own session name, for ordinary launches and lanes. A failure to name or color never fails the spawn: when herdr-spawn detects it, the child starts with its plain launch and prints a one-line warning.
+Besides the Herdr name, a child gets `<name>` as its harness's own session name, for ordinary launches and lanes. A failure to name or color never fails the spawn: when herdr-spawn detects it, it warns, and the child starts with its plain launch (a built-in Codex lane continues unnamed instead). The warning is one line; other messages can appear beside it, such as those of the Codex helper and app-server.
 
 | Agent | How it is named | If that fails |
 |---|---|---|
@@ -67,7 +67,7 @@ Only Claude children get a prompt-bar color; herdr-spawn sets none for Codex, Op
 
 A colored Claude child (including a custom `claude ` template that gets a color) and a named Codex child open their session by resuming it, so `SessionStart` hooks that match only `startup` do not run in them, and hooks that match `resume` do. Context a `startup` hook would add is therefore missing from the child's first request. A colored Claude child's history also begins with the `/color` command and its output. A Claude or ordinary Codex child that starts with its plain launch is a new session. A built-in Codex lane is different: it resumes its saved thread whether or not it was named.
 
-The color call and the OpenCode API call are cut off after 20 seconds by `timeout`, which kills a call still running 5 seconds later, or by a `perl` alarm when the caller's host has no `timeout`; where the chosen one cannot run, the child starts with its plain launch. The `perl` alarm stops only the process it started, so a launcher's hung child can keep the call waiting longer.
+The color call and the OpenCode API call are cut off after 20 seconds by `timeout`, which kills a call still running 5 seconds later, or by a `perl` alarm when the caller's host has no `timeout`; where the chosen one cannot run, the child starts with its plain launch. Each call writes to a file in the private startup directory, so a process it leaves running does not keep the launch waiting. The `perl` alarm signals only the process it started: a launcher's hung child can be left running, and a process that ignores the signal is not cut off.
 
 A custom template of any agent gets a color too when it starts with `claude `, the next word does not start with a letter (as in the subcommands `claude agents` or `claude mcp`) and none of its words is `-r`, `--resume`, `-c`, `--continue`, `--session-id`, `--fork-session`, `-p`, `--print`, `--bg`, `--background`, `--cloud`, `--teleport`, `--from-pr`, `-w`, `--worktree`, `--no-session-persistence`, `--environment` or `--desktop` (also as `--flag=value`). Other custom templates run as written, and naming is up to them.
 
@@ -75,7 +75,7 @@ A custom template of any agent gets a color too when it starts with `claude `, t
 
 A Claude Code session that spawns a lane gets a name and a color too; coordinators on other harnesses get neither. Its first lane (`--lane` or `--subtask-of`) requests the name `coord-<repo>`, after the main repository of the caller's directory (the directory's own name outside git), and a color: the one its transcript records if `/color` takes it, otherwise a random one. Lane children avoid the coordinator's color as described above. Ordinary spawns request nothing.
 
-Only the session itself can apply these, so the plugin's mod (`hooks/coordinator-identity.mjs`) does it once the session is idle, running `/rename` and `/color` only for what the session does not have yet; a title Claude Code generates on its own does not count as a name. A request made during a turn is applied after the turn ends, and an unsent draft is left alone.
+Only the session itself can apply these, so the plugin's mod (`hooks/coordinator-identity.mjs`) does it once the session is idle, running `/rename` and `/color` only for what the session does not have yet; a title Claude Code generates on its own does not count as a name. A request made during a turn is applied after the turn ends (after an interrupted turn, Esc, it was observed still pending), and an unsent draft is left alone.
 
 This needs Claude Code 2.1.326 or newer with mods on and this plugin installed at 3.2.0 or newer; the plain skill folder has no mod. Claude Code 2.1.200 was tested to ignore the mod and still load the plugin's hooks. On 2.1.332, installing or updating the plugin (`claude plugin install` or `update`, and the `/plugin` screen) asked for no approval specific to the mod, only the generic plugin trust warning. A session that is already running gets the mod after the plugin is updated and the session reloads its plugins or restarts.
 

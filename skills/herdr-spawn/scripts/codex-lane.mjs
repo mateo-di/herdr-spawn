@@ -79,6 +79,12 @@ async function bootstrap(objective) {
   }
 
   let timer;
+  let expire;
+  const deadline = Date.now() + 25_000;
+  function expireIn(ms) {
+    clearTimeout(timer);
+    timer = setTimeout(() => expire(new Error('Codex app-server startup timed out')), ms);
+  }
   try {
     return await Promise.race([
       (async () => {
@@ -107,8 +113,10 @@ async function bootstrap(objective) {
           if (!matchesGoal(saved, threadId, objective)) {
             throw new Error(`thread/goal/get did not return the matching active goal for ${threadId}`);
           }
-          // A lane's goal matters more than its name: name last, and give up before the startup deadline.
+          // A lane's goal matters more than its name: name last, and give up before the startup deadline. A goal
+          // answered late moves that deadline, so naming and then the server's exit keep their own time.
           // No request may follow, since an abandoned one would still consume the next response.
+          expireIn(Math.max(deadline - Date.now(), 12_000));
           try {
             await Promise.race([setName(threadId), delay(5_000, undefined, { ref: false }).then(() => {
               throw new Error('naming timed out after 5s');
@@ -140,7 +148,8 @@ async function bootstrap(objective) {
         return thread;
       })(),
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Codex app-server startup timed out after 25s')), 25_000);
+        expire = reject;
+        expireIn(deadline - Date.now());
       }),
     ]);
   } finally {

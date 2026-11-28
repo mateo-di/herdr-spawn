@@ -14,16 +14,21 @@ cat >"$tmp/bin/test-launch" <<'SH'
 #!/usr/bin/env bash
 set -eu
 if [[ ${TEST_ASYNC:-0} == 1 ]]; then
-  "$@" </dev/null >"$TEST_PANE" 2>&1 &
+  "$@" <"$TEST_INPUT" >"$TEST_PANE" 2>&1 &
 else
-  "$@" </dev/null >"$TEST_PANE" 2>&1
+  "$@" <"$TEST_INPUT" >"$TEST_PANE" 2>&1
 fi
 SH
+# What waits on the pane's input, which no naming step may read.
+printf '%s\n' 'typed ahead' >"$tmp/input"
 cat >"$tmp/bin/test-shell" <<'SH'
 #!/usr/bin/env bash
 set -eu
 # With no arguments it is the plain shell left behind once the agent exits.
-[[ $# -gt 0 ]] || exit 0
+if [[ $# -eq 0 ]]; then
+  printf '%s\n' plain >>"$TEST_SHELLS"
+  exit 0
+fi
 [[ $# -eq 2 && $1 == -ic ]]
 if [[ ${TEST_CHILD_ZSH:-0} == 1 ]]; then
   ZDOTDIR=${TEST_RC%/*} exec zsh -d -ic "$2"
@@ -61,9 +66,18 @@ case "$app:${1:-}:${2:-}" in
     done
     ;;
 esac
+time_limited_step() {
+  if read -r _; then printf '%s\n' 'the naming step read the pane input' >&2; exit 1; fi
+  # Left behind, holding the step's output open.
+  if [[ -n ${TEST_STEP_HOLD:-} ]]; then
+    sleep 10 &
+    printf '%s\n' "$!" >"$TEST_STEP_HOLD"
+  fi
+  sleep "${TEST_STEP_DELAY:-0}"
+}
 case "$app:${1:-}" in
   claude:-p)
-    sleep "${TEST_STEP_DELAY:-0}"
+    time_limited_step
     color=${!#}
     # The session ID is the argument before the command. Claude Code saves the session under it.
     if [[ ${TEST_CLAUDE_EXIT:-0} == 0 && ${TEST_CLAUDE_NO_TRANSCRIPT:-0} != 1 ]]; then
@@ -75,7 +89,7 @@ case "$app:${1:-}" in
     exit "${TEST_CLAUDE_EXIT:-0}"
     ;;
   opencode:api)
-    sleep "${TEST_STEP_DELAY:-0}"
+    time_limited_step
     if [[ -n ${TEST_OC_RESPONSE:-} ]]; then printf '%s\n' "$TEST_OC_RESPONSE"
     else jq -c '{data: {id: "ses_abc123", title, location}}' <<<"${!#}"; fi
     exit "${TEST_OC_EXIT:-0}"
@@ -210,7 +224,9 @@ case ${1:-} in
   do)
     if [ "${2:-}" = pane.split ]; then
       argv=()
-      while IFS= read -r arg; do argv+=("$arg"); done < <(jq -r '.[]' <<<"$8")
+      while IFS= read -r -d '' arg; do argv+=("$arg"); done < <(jq -j '.[] + "\u0000"' <<<"$8")
+      # The caller's directory can be gone by the time the pane's shell enters it.
+      [[ -z ${TEST_GONE:-} ]] || rmdir -- "$TEST_GONE"
       test-launch "${argv[@]}"
       printf '%s\n' '{"terminal":"t-child"}'
       exit 0
@@ -233,6 +249,7 @@ chmod +x "$tmp/bin/"* "$tmp/timeout/timeout"
 export TEST_TIMEOUTS="$tmp/timeouts"
 export PATH="$tmp/bin:$tmp/timeout:$PATH" HERDR_ENV=0 HC_TERMINAL_ID=t-parent SHELL="$tmp/bin/test-shell" HOME="$tmp/home"
 export TEST_RC="$tmp/rc" TEST_CALLS="$tmp/calls" TEST_PANE="$tmp/pane" TEST_STATUS="$tmp/status"
+export TEST_INPUT="$tmp/input" TEST_SHELLS="$tmp/shells"
 unset CLAUDE_CODE_SESSION_ID OPENCODE_CONFIG OPENCODE_CONFIG_CONTENT HERDR_SPAWN_SESSION_NAME \
   HERDR_PANE_ID HERDR_WORKSPACE_ID
 export TEST_SPACE=sp-parent TEST_TAB=tb-parent TEST_ARGS="$tmp/args"
@@ -437,12 +454,14 @@ printf '%s\n' 'unset RANDOM; RANDOM=0' >"$tmp/seed"
 export BASH_ENV="$tmp/seed"
 uuid=abcdef12-3456-4abc-8abc-123456789abc
 
+# shellcheck disable=SC2016 # jq variables.
 check_claude_color() { # <name> <color>
   calls --arg name "$1" --arg color "$2" --arg id "$uuid" '
     map([.app, .via]) == [["claude", ""], ["claude", ""]]
     and .[0].argv == ["-p", "--safe-mode", "--setting-sources", "user", "-n", $name, "--session-id", $id, "/color " + $color]
     and .[1].argv[:2] == ["--resume", $id]'
 }
+# shellcheck disable=SC2016 # jq variables.
 check_claude() {
   run_spawn claude cc-plain "$prompt"
   check_claude_color cc-plain red
@@ -452,6 +471,7 @@ check_claude() {
   calls --arg file "$(goal_dir)/brief.md" '.[1].argv[2:] == ["--model", "opus", "-n", "cc-lane",
     "--append-system-prompt-file", $file, "/goal \($goal) (brief: \($file))"]'
 }
+# shellcheck disable=SC2016 # jq variables.
 check_claude_fallback() {
   local failure
   for failure in TEST_CLAUDE_RESPONSE=nope TEST_CLAUDE_EXIT=1; do
@@ -462,6 +482,7 @@ check_claude_fallback() {
     grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
   done
 }
+# shellcheck disable=SC2016 # jq variables.
 check_claude_bounded() {
   check_claude
   # The last run opened a tab, whose naming calls `timeout` too.
@@ -473,6 +494,7 @@ check_claude_bounded() {
   grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
 }
 # A function or alias cannot be time-limited, so it gets no color call.
+# shellcheck disable=SC2016 # jq variables.
 check_claude_wrapped() {
   local wrapper
   for wrapper in function:wrapper alias:alias; do
@@ -484,6 +506,7 @@ check_claude_wrapped() {
 }
 # Without a saved transcript there is nothing to resume. It is looked up where the child shell keeps it, through a
 # linked projects directory too.
+# shellcheck disable=SC2016 # jq variables.
 check_claude_transcript() {
   rm -rf -- "$CLAUDE_CONFIG_DIR/projects/child"
   TEST_CLAUDE_NO_TRANSCRIPT=1 run_spawn claude cc-unsaved "$prompt"
@@ -508,9 +531,11 @@ printf '%s\n' 'PASS: a plain claude colors a new session under a time limit; a w
 TEST_NO_UUIDGEN=1 run_spawn claude cc-proc "$prompt"
 calls '.[1].argv[:2] == ["--resume", "fedcba98-7654-4321-8fed-cba987654321"]'
 TEST_NO_UUIDGEN=1 TEST_NO_PROC_UUID=1 run_spawn claude cc-no-uuid "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["-n", "cc-no-uuid", $brief]]'
 grep -Fq 'no UUID from uuidgen or /proc' "$err"
 XDG_STATE_HOME="$tmp/prompt" run_spawn claude cc-no-state "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["-n", "cc-no-state", $brief]]'
 grep -Fq 'could not create a startup directory' "$err"
 (cd "$tmp" && XDG_STATE_HOME=relative/missing run_spawn claude cc-relative "$prompt")
@@ -565,42 +590,104 @@ printf '%s\n' \
 export HERDR_SPAWN_CONFIG="$tmp/agents.conf"
 run_spawn claude-opus cc-custom "$prompt"
 check_claude_color cc-custom red
+# shellcheck disable=SC2016 # jq variables.
 calls '.[1].argv[2:] == ["-n", "cc-custom", "--model", "opus", $brief]'
 run_spawn "${lane[@]}" claude-opus cc-custom-lane "$prompt"
 check_claude_color cc-custom-lane red
 calls --arg file "$(goal_dir)/brief.md" '.[1].argv[2:5] == ["-n", "cc-custom-lane", "--model"] and (.[1].argv | length) == 7'
 run_spawn claude-back cc-back "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["--resume", "abc", "-n", "cc-back", $brief]]'
 run_spawn claude-equals cc-equals "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["--session-id=abc", "-n", "cc-equals", $brief]]'
 run_spawn claude-note cc-note "$prompt"
 check_claude_color cc-note red
+# shellcheck disable=SC2016 # jq variables.
 calls '.[1].argv[2:] == ["-n", "cc-note", $brief]'
-# Only the TUI types the template with nothing after it, where a trailing separator is valid.
+# `hc run` types `; exec <shell>` after the template, where a trailing separator is invalid; the TUI adds nothing.
 HERDR_ENV=1 HERDR_PANE_ID=p-parent run_spawn claude-semi cc-semi "$prompt" p-target right
 check_claude_color cc-semi red
+# shellcheck disable=SC2016 # jq variables.
 calls '.[1].argv[2:] == ["-n", "cc-semi", $brief]'
 run_spawn claude-first cc-first "$prompt"
 check_claude_color cc-first red
+# shellcheck disable=SC2016 # jq variables.
 calls '.[1].argv[2:] == [$brief]'
 run_spawn claude-env cc-env "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["--environment", "abc", "-n", "cc-env", $brief]]'
 run_spawn claude-desktop cc-desktop "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["--desktop", "-n", "cc-desktop", $brief]]'
 run_spawn claude-agents cc-agents "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["agents", $brief]]'
 run_spawn claude-mcp cc-mcp "$prompt"
 calls 'map(.argv) == [["mcp", "list"]]'
 run_spawn codex cx-custom "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map([.app, .argv]) == [["codex", ["--custom", $brief]]]'
 run_spawn opencode oc-custom "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["--auto", "--prompt", $brief]]'
 export HERDR_SPAWN_CONFIG="$tmp/no-config"
 unset BASH_ENV
 printf '%s\n' 'PASS: a custom claude template gets a color unless it runs a subcommand or picks its session; others are unchanged'
 
+# A split types `cd` ahead of the launch. Every launch form runs after it, or, where it fails, none of it does; the
+# plain shell follows either way.
+mkdir "$tmp/no-sleep"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$tmp/no-sleep/sleep"
+chmod +x "$tmp/no-sleep/sleep"
+check_split() {
+  local form config
+  local -a args
+  for form in claude codex opencode '--task complex opencode' omp claude-note claude-semi; do
+    read -ra args <<<"$form"
+    config=$tmp/no-config
+    [[ $form != claude-* ]] || config=$tmp/agents.conf
+    : >"$TEST_SHELLS"
+    HERDR_SPAWN_CONFIG=$config TEST_APP=codex run_spawn "${args[@]}" split "$prompt" p-target right
+    calls 'length > 0'
+    [[ $(wc -l <"$TEST_SHELLS") -eq 1 ]]
+    : >"$TEST_SHELLS"
+    mkdir "$tmp/gone"
+    # A child that marks startup is never confirmed here, so the wait is cut short and the spawn may fail.
+    (
+      cd "$tmp/gone"
+      PATH="$tmp/no-sleep:$PATH" TEST_GONE="$tmp/gone" HERDR_SPAWN_CONFIG=$config \
+        run_spawn "${args[@]}" split "$prompt" p-target right
+    ) || grep -Fq 'no startup confirmation' "$err"
+    calls 'length == 0'
+    [[ $(wc -l <"$TEST_SHELLS") -eq 1 ]]
+  done
+}
+check_split
+printf '%s\n' 'PASS: a split whose cd fails runs no naming step or agent, and every launch form ends in a plain shell'
+
+# A process the naming step leaves behind holds its output open; the launch does not wait for it.
+check_left_behind() {
+  local agent code held
+  for agent in claude opencode; do
+    for code in 0 1; do
+      TEST_STEP_HOLD="$tmp/held" TEST_CLAUDE_EXIT=$code TEST_OC_EXIT=$code run_spawn "$agent" left-behind "$prompt"
+      held=$(<"$tmp/held")
+      # Still running, so nothing waited for it to end.
+      kill -0 "$held"
+      kill "$held"
+      # shellcheck disable=SC2016 # jq variables.
+      calls --argjson code "$code" \
+        'length == 2 and (.[1].argv | any(. == "--resume" or . == "--session")) == ($code == 0)'
+    done
+  done
+}
+check_left_behind
+printf '%s\n' 'PASS: a process left holding a naming step'\''s output does not delay the launch'
+
 export TEST_APP=codex
 helper=$root/skills/herdr-spawn/scripts/codex-lane.mjs
+# shellcheck disable=SC2016 # jq variables.
 check_codex() {
   run_spawn codex cx-plain "$prompt"
   calls 'map([.app, .argv]) == [["node", ["--name-only", "cx-plain"]], ["codex", ["resume", "--", "test-thread", $brief]]]'
@@ -613,6 +700,7 @@ check_codex() {
     and (.[0].argv[0] | test("/\\.startup\\.[A-Za-z0-9]+$"))'
   grep -Fxq 'goal_startup=ready' "$TEST_LABEL"
 }
+# shellcheck disable=SC2016 # jq variables.
 check_codex_fallback() {
   local code
   for code in 1 127; do
@@ -655,6 +743,7 @@ check_codex_app
 unset TEST_APP
 printf '%s\n' 'PASS: Codex resumes the thread the helper named, keeps its launch otherwise, and waits for codex when it is plain'
 
+# shellcheck disable=SC2016 # jq variables.
 check_opencode() {
   local dir jq_defs
   dir=$(pwd -P)
@@ -679,6 +768,7 @@ check_opencode() {
 oc_response() { # <id> <title> <directory>
   jq -cn --arg id "$1" --arg title "$2" --arg directory "$3" '{data: {$id, $title, location: {$directory}}}'
 }
+# shellcheck disable=SC2016 # jq variables.
 check_opencode_fallback() {
   local failure dir
   dir=$(pwd -P)
@@ -699,6 +789,7 @@ jq -es 'map(select(index("opencode"))) | length == 1
   and .[0][:6] == ["-k", "5", "20", "opencode", "api", "--standalone"]' "$TEST_TIMEOUTS" >/dev/null
 check_opencode_fallback
 TEST_OC_EXIT=1 run_spawn --task complex opencode oc-routed "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls '.[1].argv == ["--auto", "--standalone", "--prompt", $brief] and (.[1].config | endswith("/opencode.json"))'
 # A directory to quote, reached through a link: the session gets the physical path.
 mkdir "$tmp/oc \"dir\" 'with' \$HOME; (x)"
@@ -713,9 +804,11 @@ for tool in bash jq dirname awk mktemp mkdir mv rm rmdir seq sleep tr find wc; d
 done
 ! command -v zsh >/dev/null || ln -s "$(command -v zsh)" "$tmp/tools/zsh"
 PATH="$tmp/bin:$tmp/tools" run_spawn opencode oc-no-limit "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["--auto", "--prompt", $brief]]'
 grep -Fxq 'spawn.sh: could not create a named OpenCode session; starting with the default title' "$TEST_PANE"
 PATH="$tmp/bin:$tmp/tools" run_spawn claude cc-no-limit "$prompt"
+# shellcheck disable=SC2016 # jq variables.
 calls 'map(.argv) == [["-n", "cc-no-limit", $brief]]'
 grep -Fxq 'spawn.sh: could not set the Claude session color; starting without it' "$TEST_PANE"
 ln -s "$(command -v perl)" "$tmp/tools/perl"
@@ -728,10 +821,12 @@ check_perl_limit() {
   grep -Fq "perl -e 'alarm shift; exec @ARGV' 20 claude -p" "$TEST_ARGS"
 }
 check_perl_limit
+PATH="$tmp/bin:$tmp/tools" check_left_behind
 printf '%s\n' 'PASS: without timeout the naming steps run under a perl limit, and without either the launch is plain'
 
 adapters=$root/adapters/omp
 [[ -f $adapters/herdr-spawn.ts && -f $adapters/herdr-spawn.yml ]]
+# shellcheck disable=SC2016 # jq variables.
 check_omp() {
   run_spawn omp omp-plain "$prompt"
   calls --arg dir "$adapters" 'map([.via, .session_name, .argv]) == [["alias", "omp-plain",
@@ -791,6 +886,9 @@ if command -v zsh >/dev/null; then
   check_opencode_fallback
   (cd "$tmp/oc-link"; check_opencode)
   check_perl_limit
+  PATH="$tmp/bin:$tmp/tools" check_left_behind
+  check_left_behind
+  check_split
   check_omp
   unset TEST_CHILD_ZSH BASH_ENV
   printf '%s\n' 'PASS: the same launch lines work in an interactive zsh'
