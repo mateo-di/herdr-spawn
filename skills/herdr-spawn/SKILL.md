@@ -91,6 +91,8 @@ In the Herdr app every lane is an `hc` terminal, your child, with `lane_of`, `la
 
 Spawning lanes makes you their coordinator. Your goal is every lane you spawned at `done`, its result verified and integrated; the lanes do the work and you keep them unblocked.
 
+A Claude Code coordinator's first lane also requests a session name (`coord-<repo>`) and a color, which the plugin's mod sets once your turn ends, only where you have none (Claude Code 2.1.326 or newer, with mods on). While the request is unapplied, `spawn.sh` prints both values on stderr. If it still does in a later turn, the mod cannot run: ask the user to type `/rename coord-<repo>` and `/color <color>`, whichever your session lacks.
+
 - Before starting panes, split the request into independently verifiable deliverables. Give each deliverable one root lane and put its bounded subtasks in that lane's tab. For each pane, record its scope, dependencies, done criterion, and `--task` class.
 - Tell a root driver which subtasks you will launch, what it owns directly, and which results it must wait for before declaring the whole lane done. Subtask reports come to you; verify and relay the results the driver needs.
 

@@ -1,6 +1,6 @@
 {
   "name": "herdr-spawn",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Spawn goal-driven Herdr lane tabs and subtask panes, and route models across Claude Code, Codex, OpenCode and oh-my-pi.",
   "author": {
     "name": "mateo-di",

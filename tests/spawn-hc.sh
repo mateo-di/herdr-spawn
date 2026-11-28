@@ -144,11 +144,15 @@ set -eu
 case "$1:$2" in
   agent:get)
     [[ $3 == p-child ]] || exit 1
-    jq -nc --arg app "$(test-status)" '{result: {agent: {pane_id: "p-child", agent: $app, agent_status: "idle"}}}'
+    jq -nc --arg app "$(test-status)" \
+      '{result: {agent: {pane_id: "p-child", agent: $app, agent_status: "idle", agent_session: {value: "s-child"}}}}'
     ;;
   pane:split) printf '%s\n' '{"result":{"pane":{"pane_id":"p-child"}}}' ;;
+  tab:create) printf '%s\n' '{"result":{"root_pane":{"pane_id":"p-child"}}}' ;;
   pane:run) test-launch "$SHELL" -ic "$4" ;;
-  agent:rename) ;;
+  agent:rename|pane:report-metadata) ;;
+  # The lanes watcher stops at once.
+  pane:get) printf '%s\n' pane_not_found >&2; exit 1 ;;
   *) exit 99 ;;
 esac
 SH
@@ -692,3 +696,139 @@ if command -v zsh >/dev/null; then
 else
   printf '%s\n' 'SKIP: zsh is not installed'
 fi
+
+# A coordinator's name and color. RANDOM stays 0: red is requested unless the transcript says otherwise, and a
+# child that avoids red gets blue.
+export BASH_ENV="$tmp/seed" XDG_STATE_HOME="$tmp/identity-state" GIT_CEILING_DIRECTORIES="$tmp"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
+me=11111111-2222-4333-8444-abcdefabcdef
+identity=$XDG_STATE_HOME/herdr-spawn/identity
+request=$identity/$me.json
+git init -q "$tmp/main-repo.x"
+git -C "$tmp/main-repo.x" -c user.name=test -c user.email=test@example.invalid commit -q --allow-empty -m init
+git -C "$tmp/main-repo.x" worktree add -q "$tmp/linked"
+cd "$tmp/main-repo.x"
+
+check_request() { # <name> <color>
+  jq -es --arg id "$me" --arg name "$1" --arg color "$2" \
+    '. == [{sessionId: $id, name: $name, color: $color, done: false}]' "$request" >/dev/null
+}
+check_notice() { # <name> <color>
+  [[ $(grep -c 'coordinator name' "$err") -eq 1 ]]
+  grep -Fq "coordinator name $1 and color $2 requested for this session, not applied yet" "$err"
+  grep -Fq "when this turn ends" "$err"
+  grep -Fq "ask the user to type /rename $1 and /color $2, whichever this session lacks" "$err"
+}
+check_silent() { if grep -Fq 'coordinator name' "$err"; then return 1; fi; }
+
+run_spawn "${lane[@]}" claude id-no-caller "$prompt"
+check_claude_color id-no-caller red
+check_silent
+CLAUDE_CODE_SESSION_ID=not-a-session run_spawn "${lane[@]}" claude id-bad-caller "$prompt"
+check_silent
+CLAUDE_CODE_SESSION_ID=$me run_spawn claude id-ordinary "$prompt"
+check_claude_color id-ordinary red
+check_silent
+CLAUDE_CODE_SESSION_ID=$me run_spawn --tab "$tmp/work tree" claude id-ordinary-tab "$prompt"
+check_silent
+[[ ! -e $identity ]]
+printf '%s\n' 'PASS: ordinary spawns and callers without a Claude session ID request no coordinator identity'
+
+export CLAUDE_CODE_SESSION_ID
+CLAUDE_CODE_SESSION_ID=$(printf '%s' "$me" | tr 'a-f' 'A-F')
+(cd "$tmp/linked" && run_spawn "${lane[@]}" claude id-first "$prompt")
+check_request coord-main-repo.x red
+[[ -n $(find "$request" -prune -perm 0600) ]]
+[[ $(find "$identity" -type f) == "$request" ]]
+check_notice coord-main-repo.x red
+check_claude_color id-first blue
+printf '%s\n' "PASS: a first lane requests the main repository's name and a color its child avoids"
+
+cp "$request" "$tmp/first-request"
+run_spawn "${lane[@]}" claude id-second "$prompt"
+cmp "$request" "$tmp/first-request"
+check_notice coord-main-repo.x red
+check_claude_color id-second blue
+run_spawn claude id-later "$prompt"
+check_claude_color id-later blue
+check_silent
+jq -c '.done = true' "$tmp/first-request" >"$request"
+cp "$request" "$tmp/done-request"
+run_spawn "${lane[@]}" claude id-done "$prompt"
+cmp "$request" "$tmp/done-request"
+check_silent
+check_claude_color id-done blue
+printf '%s\n' 'PASS: the request is written once and repeated on each lane until it is done'
+
+transcript=$CLAUDE_CONFIG_DIR/projects/coordinator/$me.jsonl
+printf '%s\n' "{\"type\":\"agent-color\",\"agentColor\":\"red\",\"sessionId\":\"$me\"}" >"$transcript"
+jq -c '.color = "blue"' "$tmp/first-request" >"$request"
+run_spawn "${lane[@]}" claude id-transcript-first "$prompt"
+check_claude_color id-transcript-first blue
+rm "$request"
+printf '%s\n' "{\"type\":\"agent-color\",\"agentColor\":\"pink\",\"sessionId\":\"$me\"}" >"$transcript"
+run_spawn "${lane[@]}" claude id-transcript "$prompt"
+check_request coord-main-repo.x pink
+check_claude_color id-transcript red
+rm "$request"
+printf '%s\n' "{\"type\":\"agent-color\",\"agentColor\":\"default\",\"sessionId\":\"$me\"}" >"$transcript"
+run_spawn "${lane[@]}" claude id-transcript-default "$prompt"
+jq -e '.color == "red"' "$request" >/dev/null
+rm "$transcript" "$request"
+printf '%s\n' "PASS: the transcript color is requested and avoided; a value /color does not take is replaced"
+
+mkdir -p "$tmp/.-plain dir_1.é" "$tmp/---"
+(cd "$tmp/.-plain dir_1.é" && run_spawn "${lane[@]}" claude id-plain "$prompt")
+check_request coord-plaindir_1. red
+rm "$request"
+(cd "$tmp/---" && run_spawn "${lane[@]}" claude id-unnamed "$prompt")
+check_request coord-session red
+rm "$request"
+mkdir "$tmp/no-git"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 127' >"$tmp/no-git/git"
+chmod +x "$tmp/no-git/git"
+(cd "$tmp/linked" && PATH="$tmp/no-git:$PATH" run_spawn "${lane[@]}" claude id-no-git "$prompt")
+check_request coord-linked red
+rm "$request"
+printf '%s\n' 'PASS: outside git, or without it, the working directory names the coordinator'
+
+for content in 'not json' '' '[]' '{"done":false}' \
+  "{\"sessionId\":\"$coordinator\",\"name\":\"coord-other\",\"color\":\"red\",\"done\":false}" \
+  "{\"sessionId\":\"$me\",\"name\":\"coord-a b\",\"color\":\"red\",\"done\":false}" \
+  "{\"sessionId\":\"$me\",\"name\":\"coord-a\",\"color\":\"red blue\",\"done\":false}"; do
+  printf '%s\n' "$content" >"$request"
+  cp "$request" "$tmp/foreign-request"
+  run_spawn "${lane[@]}" claude id-foreign "$prompt"
+  cmp "$request" "$tmp/foreign-request"
+  [[ $(wc -l <"$err") -eq 1 ]]
+  grep -Fq 'no usable coordinator name and color request' "$err"
+  calls 'length == 2 and .[1].argv[0] == "--resume"'
+done
+rm -r "$identity"
+: >"$identity"
+run_spawn "${lane[@]}" claude id-unwritable "$prompt"
+check_claude_color id-unwritable red
+grep -Fxq 'goal_startup=ready' "$TEST_LABEL"
+[[ $(wc -l <"$err") -eq 1 ]]
+grep -Fq 'no usable coordinator name and color request' "$err"
+[[ -f $identity && ! -s $identity ]]
+rm "$identity"
+printf '%s\n' 'PASS: an unusable or unwritable request warns in one line and the lane still starts'
+
+HERDR_ENV=1 HERDR_PANE_ID=p-parent run_spawn "${lane[@]}" claude id-tui "$prompt"
+check_request coord-main-repo.x red
+check_notice coord-main-repo.x red
+check_claude_color id-tui blue
+# Let the detached watcher end before the directory goes.
+for _ in $(seq 50); do
+  ! grep -Fq 'is gone' "$XDG_STATE_HOME/herdr-spawn/watch-p-parent.log" 2>/dev/null || break
+  sleep 0.1
+done
+grep -Fq 'is gone' "$XDG_STATE_HOME/herdr-spawn/watch-p-parent.log"
+for _ in $(seq 50); do
+  [[ -e $XDG_STATE_HOME/herdr-spawn/watch-p-parent.lock ]] || break
+  sleep 0.1
+done
+[[ ! -e $XDG_STATE_HOME/herdr-spawn/watch-p-parent.lock ]]
+printf '%s\n' 'PASS: a lane in a Herdr pane requests the coordinator identity too'

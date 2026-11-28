@@ -17,6 +17,8 @@
 # --goal "<objective with its done criterion>" is required for lanes and refused otherwise: a lane always has a
 # goal from its coordinator. The lane's prompt becomes a composed file in the state dir (lane protocol, goal, then
 # the caller's brief), and the lane launches from a `lane:<agent>` template that holds the harness to the goal.
+# A Claude Code caller of a lane also gets a request in the state dir (identity/<session-id>.json) for the name and
+# color that the plugin's mod gives its session, and a stderr line while that is not done.
 # Built-in claude, codex, opencode and omp children also get <name> as their native session name, and a template
 # starting with `claude ` that selects no session itself gets a prompt-bar color. What needs a step before the TUI
 # runs it in the child shell and falls back to the plain launch with a warning; the child then marks a private
@@ -428,17 +430,82 @@ named_launch() { # <prefix> <empty arrays> <condition> <filled arrays> <command>
   launch="$1$2; if $3; then $4; else printf '%s\n' 'spawn.sh: $7' >&2; fi; $mark; $5"
 }
 
+claude_colors=(red blue green yellow purple orange pink cyan)
+
+known_color() { # <value>
+  local color
+  for color in "${claude_colors[@]}"; do [ "$color" != "$1" ] || return 0; done
+  return 1
+}
+
+# The session ID of a Claude Code caller, lowercased; fails for any other caller.
+coordinator_id() {
+  local id
+  id=$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-}" | LC_ALL=C tr 'A-F' 'a-f')
+  [[ $id =~ $uuid_pattern ]] && printf '%s' "$id"
+}
+
 # The prompt-bar color of a Claude Code coordinator, from its own transcript; prints nothing when unknown.
 coordinator_color() {
   local id
-  id=$(printf '%s' "${CLAUDE_CODE_SESSION_ID:-}" | LC_ALL=C tr 'A-F' 'a-f')
-  [[ $id =~ $uuid_pattern ]] || return 0
+  id=$(coordinator_id) || return 0
   local files=("${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/projects/*/"$id.jsonl")
   [ "${#files[@]}" -eq 1 ] && [ -f "${files[0]}" ] && [ -r "${files[0]}" ] || return 0
   jq -nRr --arg id "$id" '
     reduce (inputs | select(contains("\"agent-color\"")) | fromjson? | objects
       | select(.type == "agent-color" and .sessionId == $id)) as $row (""; $row.agentColor)
   ' "${files[0]}" 2>/dev/null || true
+}
+
+# The color asked for this coordinator, which its transcript does not record until it is applied.
+requested_color() {
+  local id
+  id=$(coordinator_id) || return 0
+  jq -r --arg id "$id" 'objects | select(.sessionId == $id) | .color | strings' "$statedir/identity/$id.json" \
+    2>/dev/null || true
+}
+
+write_identity() { # <session-id> <file>
+  local repo color
+  # A linked worktree's common directory is the main repository's. Outside git, the working directory names it.
+  if ! repo=$(git rev-parse --path-format=absolute --git-common-dir) || [[ $repo != /* ]]; then repo=$PWD; fi
+  repo=${repo%/.git}
+  repo=$(printf '%s' "${repo##*/}" | LC_ALL=C tr -cd 'A-Za-z0-9._-')
+  repo=${repo#"${repo%%[!.-]*}"}
+  color=$(coordinator_color)
+  known_color "$color" || color=${claude_colors[RANDOM % ${#claude_colors[@]}]}
+  (
+    umask 077
+    mkdir -p "${2%/*}" || exit
+    staged=$(mktemp "$2.XXXXXXXX") || exit
+    # Never over an existing request: another spawn of this session may have written it meanwhile.
+    jq -n --arg sessionId "$1" --arg name "coord-${repo:-session}" --arg color "$color" \
+      '{$sessionId, $name, $color, done: false}' >"$staged" && mv -n -- "$staged" "$2"
+    rm -f -- "$staged"
+  )
+}
+
+# A lane makes a Claude Code caller its coordinator, and only that session can set its own name and color: leave
+# one request per session for the plugin's mod (hooks/coordinator-identity.mjs), and say so until it is done.
+request_identity() {
+  local id file request name color
+  id=$(coordinator_id) || return 0
+  file=$statedir/identity/$id.json
+  [ -e "$file" ] || write_identity "$id" "$file" 2>/dev/null
+  request=$(jq -ser --arg id "$id" '
+    select(length == 1) | .[0] | select(.sessionId == $id)
+    | if .done == true then "done"
+      else "\(.name | strings | select(test("\\Acoord-[A-Za-z0-9._-]+\\z"))) \(.color | strings)" end
+  ' "$file" 2>/dev/null) || request=
+  [ "$request" != 'done' ] || return 0
+  name=${request%% *} color=${request#* }
+  if ! known_color "$color"; then
+    echo "spawn.sh: warning: no usable coordinator name and color request at $file" >&2
+    return 0
+  fi
+  echo "spawn.sh: coordinator name $name and color $color requested for this session, not applied yet; they apply" \
+    "when this turn ends. If a later turn still says so, ask the user to type /rename $name and /color $color," \
+    "whichever this session lacks" >&2
 }
 
 # A template that selects a session itself, or prints and exits, is launched as it is.
@@ -456,7 +523,8 @@ color_claude() {
     return 0
   fi
   current=$(coordinator_color)
-  for choice in red blue green yellow purple orange pink cyan; do
+  [ -n "$current" ] || current=$(requested_color)
+  for choice in "${claude_colors[@]}"; do
     [ "$choice" = "$current" ] || choices+=("$choice")
   done
   color=${choices[RANDOM % ${#choices[@]}]}
@@ -514,6 +582,8 @@ name_opencode() {
 
 prepare_launch() {
   if [ -n "$lane" ]; then
+    # Before the child's color is chosen, so that it avoids this one. Nothing in it may fail the spawn.
+    request_identity || true
     create_goal_manifest
     # The same private, unique directory holds the brief and any generated config.
     promptfile=$goal_dir/brief.md

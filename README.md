@@ -13,6 +13,7 @@ An Opus coordinator in the Herdr app runs two tickets as driver lanes, each in i
 - A bash- or zsh-compatible shell in the pane (the launch line uses `$(cat …)`)
 - For built-in Codex lanes: Codex CLI 0.171.0 (native goal startup verified on this version) and Node.js 18+ on the child shell's `PATH`. Ordinary Codex launches use the same Node.js to name the session and start unnamed without it
 - Optional, for a Claude child's color: `uuidgen` or `/proc/sys/kernel/random/uuid` on the caller's host
+- Optional, for a Claude coordinator's own name and color: Claude Code 2.1.326 or newer with mods on, and this plugin installed at 3.2.0 or newer
 - Recommended: the built-in Herdr skill, which covers prompting, waiting, reading and dialogs: `npx skills add herdrdev/herdr --skill herdr -g`
 
 ## Install
@@ -61,9 +62,19 @@ Besides the Herdr name, a child gets `<name>` as its harness's own session name,
 | OpenCode | A titled session created with `opencode api session.create` (`--standalone` when the TUI uses it), opened with `--session`. The API call runs the executable, so a shell wrapper's flags apply to the TUI only | Starts with the default title |
 | oh-my-pi | The bundled `adapters/omp/herdr-spawn.ts` extension. Ordinary launches also turn auto-resume off for that launch, so an earlier session is not reopened | Starts unnamed |
 
-Only Claude children get a prompt-bar color; herdr-spawn sets none for Codex, OpenCode or oh-my-pi. `spawn.sh` creates a session ID, sets `/color` on it with `claude -p --safe-mode --setting-sources user` in the child shell, and the TUI resumes that session. Where the caller's host has `timeout` and the shell's `claude` is a plain executable, that call is cut off after 20 seconds; through a function or alias it has no limit. The color is random and differs from the coordinator's when that can be read: the coordinator is Claude Code (`CLAUDE_CODE_SESSION_ID`) and its transcript records one.
+Only Claude children get a prompt-bar color; herdr-spawn sets none for Codex, OpenCode or oh-my-pi. `spawn.sh` creates a session ID, sets `/color` on it with `claude -p --safe-mode --setting-sources user` in the child shell, and the TUI resumes that session. Where the caller's host has `timeout` and the shell's `claude` is a plain executable, that call is cut off after 20 seconds; through a function or alias it has no limit. The color is random and differs from the coordinator's when that is known: the coordinator is Claude Code (`CLAUDE_CODE_SESSION_ID`) and its transcript records one or, failing that, a coordinator request (below) holds one.
 
 A custom template of any agent gets a color too when it starts with `claude ` and none of its words is `-r`, `--resume`, `-c`, `--continue`, `--session-id`, `--fork-session`, `-p`, `--print`, `--bg`, `--background`, `--cloud`, `--teleport`, `--from-pr`, `-w`, `--worktree` or `--no-session-persistence` (also as `--flag=value`). Other custom templates run as written, and naming is up to them.
+
+### The coordinator
+
+A Claude Code session that spawns a lane gets a name and a color too; coordinators on other harnesses get neither. Its first lane (`--lane` or `--subtask-of`) requests the name `coord-<repo>`, after the main repository of the caller's directory (the directory's own name outside git), and a color: the one its transcript records if `/color` takes it, otherwise a random one. Lane children avoid the coordinator's color as described above. Ordinary spawns request nothing.
+
+Only the session itself can apply these, so the plugin's mod (`hooks/coordinator-identity.mjs`) does it once the session is idle, running `/rename` and `/color` only for what the session does not have yet; a title Claude Code generates on its own does not count as a name. A request made during a turn is applied after the turn ends, and an unsent draft is left alone.
+
+This needs Claude Code 2.1.326 or newer with mods on and this plugin installed at 3.2.0 or newer; the plain skill folder has no mod. Claude Code 2.1.200 was tested to ignore the mod and still load the plugin's hooks. On 2.1.332, installing or updating the plugin (`claude plugin install` or `update`, and the `/plugin` screen) asked for no approval specific to the mod, only the generic plugin trust warning. A session that is already running gets the mod after the plugin is updated and the session reloads its plugins or restarts.
+
+The request is `herdr-spawn/identity/<session-id>.json` in the state directory (`${XDG_STATE_HOME:-~/.local/state}`), a private file that `spawn.sh` writes once per session and the mod marks `done`. Until then each lane spawn prints the requested name and color on stderr. If a later turn still prints them, the mod cannot apply them: type `/rename <name>` and `/color <color>` yourself, whichever the session lacks. A request that cannot be written or read warns in one line and never fails the spawn.
 
 ## Lanes
 
@@ -200,7 +211,7 @@ Custom templates receive a shell-quoted `{model}` value or an optional `{modelar
 
 ## Testing lanes
 
-Run `node --test tests/*.test.mjs` and `bash tests/spawn-hc.sh` for startup, placement, model routing, session naming, and goal lifecycle checks; they use fake agent CLIs, and `spawn-hc.sh` also runs launch lines under zsh when it is installed. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real app-server and TUI against a loopback model endpoint and verify that disabling goals prevents lane startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
+Run `node --test tests/*.test.mjs` and `bash tests/spawn-hc.sh` for startup, placement, model routing, session naming, coordinator identity, and goal lifecycle checks; they use fake agent CLIs and, for the coordinator mod, a fake mod host, and `spawn-hc.sh` also runs launch lines under zsh when it is installed. With the Codex CLI 0.171.0 executable and util-linux `script` on `PATH`, set `TEST_REAL_CODEX=1` to also test the real app-server and TUI against a loopback model endpoint and verify that disabling goals prevents lane startup. Put the Codex executable ahead of any version-manager shim; the tests use an isolated home and synthetic credentials.
 
 ## License
 
